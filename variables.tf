@@ -31,3 +31,8 @@ variable "vm_ssh_public_key" {
   description = "SSH public key to inject into the VM via cloud-init"
   type        = string
 }
+
+variable "ci_ssh_public_key" {
+  description = "Public key for CI/CD deploy access (no passphrase, dedicated to automation)"
+  type        = string
+}
