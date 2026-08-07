@@ -1,4 +1,4 @@
-resource "proxmox_virtual_environment_file" "cloud_init_user_data" {
+resource "proxmox_virtual_environment_file" "runner_user_data" {
   content_type = "snippets"
   datastore_id = "local"
   node_name    = var.proxmox_node
@@ -7,13 +7,14 @@ resource "proxmox_virtual_environment_file" "cloud_init_user_data" {
     data = templatefile("${path.module}/cloud-init/user-data.yml.tpl", {
       ssh_public_key = var.vm_ssh_public_key
     })
-    file_name = "tf-test-01-user-data.yml"
+    file_name = "ci-runner-user-data.yml"
   }
 }
 
-resource "proxmox_virtual_environment_vm" "test_vm" {
-  name      = "tf-test-01"
+resource "proxmox_virtual_environment_vm" "ci_runner" {
+  name      = "ci-runner"
   node_name = var.proxmox_node
+  tags      = ["ci"]
 
   clone {
     vm_id = var.template_vm_id
@@ -25,17 +26,17 @@ resource "proxmox_virtual_environment_vm" "test_vm" {
   }
 
   cpu {
-    cores = 2
+    cores = 1
   }
 
   memory {
-    dedicated = 2048
+    dedicated = 1536
   }
 
   disk {
     datastore_id = "local-lvm"
     interface    = "scsi0"
-    size         = 10
+    size         = 20
   }
 
   network_device {
@@ -49,7 +50,7 @@ resource "proxmox_virtual_environment_vm" "test_vm" {
       }
     }
 
-    user_data_file_id = proxmox_virtual_environment_file.cloud_init_user_data.id
+    user_data_file_id = proxmox_virtual_environment_file.runner_user_data.id
   }
 
   operating_system {
@@ -57,6 +58,11 @@ resource "proxmox_virtual_environment_vm" "test_vm" {
   }
 }
 
-output "test_vm_ipv4" {
-  value = proxmox_virtual_environment_vm.test_vm.ipv4_addresses
+output "ci_runner_ip" {
+  value = try(
+    [for ip in proxmox_virtual_environment_vm.ci_runner.ipv4_addresses :
+      ip[0] if length(ip) > 0 && startswith(ip[0], "192.168.100.")
+    ][0],
+    null
+  )
 }

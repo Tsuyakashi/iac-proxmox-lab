@@ -1,0 +1,70 @@
+# .github/workflows/pipeline.yml
+
+name: Provision & Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['*.tf', 'cloud-init/**', 'templates/**']
+
+env:
+  TF_VAR_proxmox_endpoint: ${{ secrets.PROXMOX_ENDPOINT }}
+  TF_VAR_proxmox_api_token: ${{ secrets.PROXMOX_API_TOKEN }}
+  TF_VAR_vm_ssh_public_key: ${{ secrets.VM_SSH_PUBLIC_KEY }}
+  AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+
+jobs:
+  provision:
+    runs-on: self-hosted
+    outputs:
+      done: ${{ steps.apply.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Terraform init
+        run: terraform init
+
+      - name: Terraform apply
+        id: apply
+        run: terraform apply -auto-approve
+
+      - name: Upload inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: inventory
+          path: inventory.ini
+
+  deploy:
+    needs: provision
+    runs-on: self-hosted
+    steps:
+      - name: Checkout iac-proxmox-lab (for inventory.ini on disk)
+        uses: actions/checkout@v4
+
+      - name: Checkout swarm-lab
+        uses: actions/checkout@v4
+        with:
+          repository: Tsuyakashi/swarm-lab
+          ref: v0.3.1
+          path: swarm-lab
+
+      - name: Download inventory
+        uses: actions/download-artifact@v4
+        with:
+          name: inventory
+
+      - name: Set up SSH key for Ansible
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VM_SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-agent -a "$SSH_AUTH_SOCK" > /dev/null
+          ssh-add ~/.ssh/id_ed25519
+
+      - name: Install Ansible collections
+        run: ansible-galaxy collection install -r swarm-lab/ansible/requirements.yml
+
+      - name: Run playbook
+        run: ansible-playbook -i inventory.ini swarm-lab/ansible/site.yml
