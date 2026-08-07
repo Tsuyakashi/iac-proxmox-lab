@@ -59,5 +59,10 @@ resource "proxmox_virtual_environment_vm" "ci_runner" {
 }
 
 output "ci_runner_ip" {
-  value = [for ip in proxmox_virtual_environment_vm.ci_runner.ipv4_addresses : ip if !startswith(ip[0], "127.")][0][0]
+  value = try(
+    [for ip in proxmox_virtual_environment_vm.ci_runner.ipv4_addresses :
+      ip[0] if length(ip) > 0 && startswith(ip[0], "192.168.100.")
+    ][0],
+    null
+  )
 }
