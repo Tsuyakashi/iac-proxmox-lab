@@ -60,7 +60,9 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.VM_SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-agent -a "$SSH_AUTH_SOCK" > /dev/null
+          eval "$(ssh-agent -s)"
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
           ssh-add ~/.ssh/id_ed25519
 
       - name: Install Ansible collections

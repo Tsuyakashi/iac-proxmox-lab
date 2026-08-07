@@ -6,7 +6,7 @@ variable "nodes" {
     cores    = number
   }))
   default = {
-    "prod-node"  = { tag_name = "prod", memory = 1024, cores = 1 }
+    "prod-node"  = { tag_name = "prod", memory = 2048, cores = 2 }
     "stage-node" = { tag_name = "stage", memory = 1024, cores = 1 }
     "dev-node"   = { tag_name = "dev", memory = 1024, cores = 1 }
   }
