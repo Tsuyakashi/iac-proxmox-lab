@@ -7,7 +7,7 @@ if ! pveum user list | grep -q "terraform@pve"; then
 fi
 
 if ! pveum role list | grep -q "TerraformProv"; then
-    pveum role add TerraformProv -privs "VM.Allocate VM.Clone VM.Config.Disk VM.Config.CPU VM.Config.Memory VM.Config.Network VM.Config.Options VM.Config.CDROM VM.PowerMgmt VM.Audit VM.Console VM.Monitor Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit"
+    pveum role modify TerraformProv -privs "VM.Allocate VM.Clone VM.Config.Disk VM.Config.CPU VM.Config.Memory VM.Config.Network VM.Config.Options VM.Config.CDROM VM.Config.Cloudinit VM.PowerMgmt VM.Audit VM.Console VM.Monitor Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use"
 fi
 
 pveum aclmod / -user terraform@pve -role TerraformProv
