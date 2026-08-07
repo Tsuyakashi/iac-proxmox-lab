@@ -84,12 +84,14 @@ output "node_ips" {
   }
 }
 
-# resource "local_file" "ansible_inventory" {
-#   filename = "${path.module}/inventory.ini"
-#   content = templatefile("${path.module}/templates/inventory.tpl", {
-#     nodes = { for k, v in var.nodes : k => {
-#       ip  = proxmox_virtual_environment_vm.node[k].ipv4_addresses[...][0]
-#       tag = v.tag_name
-#     }}
-#   })
-# }
+resource "local_file" "ansible_inventory" {
+  filename = "${path.module}/inventory.ini"
+  content = templatefile("${path.module}/templates/inventory.tpl", {
+    nodes = {
+      for k, v in proxmox_virtual_environment_vm.node : k => {
+        ip       = [for ip in v.ipv4_addresses : ip if !startswith(ip[0], "127.")][0][0]
+        tag_name = var.nodes[k].tag_name
+      }
+    }
+  })
+}

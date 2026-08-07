@@ -3,3 +3,4 @@ terraform.tfvars
 *.tfstate.*
 .terraform/
 crash.log
+inventory.ini
