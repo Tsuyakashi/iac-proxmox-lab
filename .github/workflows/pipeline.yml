@@ -39,7 +39,7 @@ jobs:
 
       - name: Terraform apply
         id: apply
-        run: terraform apply -auto-approve
+        run: terraform apply -auto-approve -parallelism=1
 
       - name: Upload inventory
         uses: actions/upload-artifact@v4
