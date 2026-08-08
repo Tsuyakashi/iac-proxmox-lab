@@ -94,7 +94,10 @@ resource "local_file" "ansible_inventory" {
   content = templatefile("${path.module}/templates/inventory.tpl", {
     nodes = {
       for k, v in proxmox_virtual_environment_vm.node : k => {
-        ip       = [for ip in v.ipv4_addresses : ip if !startswith(ip[0], "127.")][0][0]
+        ip = try(
+          [for ip in v.ipv4_addresses : ip if !startswith(ip[0], "127.")][0][0],
+          "unknown"
+        )
         tag_name = var.nodes[k].tag_name
       }
     }
