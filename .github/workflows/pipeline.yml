@@ -16,6 +16,7 @@ env:
   AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
   BASE_REGISTRY: ghcr.io/tsuyakashi/swarm-lab
+  GITHUB_PAT: ${{ secrets.GH_RUNNER_PAT }}
 
 jobs:
   provision:
