@@ -1,9 +1,13 @@
 # IAC Proxmox Lab
 
 Infrastructure-as-Code lab for provisioning VMs on Proxmox VE using Terraform.
-Built as a bare-metal/self-hosted counterpart to cloud-focused IaC work —
-replaces Vagrant (dev-grade local provisioning) with a Proxmox + Terraform
-stack closer to how bare-metal infrastructure is actually managed.
+Built as a bare-metal/self-hosted counterpart to cloud-focused IaC work — a
+Proxmox + Terraform stack closer to how bare-metal infrastructure is
+actually managed, used as an alternative provisioning path for
+[`swarm-lab`](../swarm-lab)'s nodes. This is deliberately **not** a
+replacement for `swarm-lab`'s own `Vagrantfile` — that stays, so `swarm-lab`
+remains fully self-contained and can be spun up on its own hardware without
+this repo (see [CI/CD](#cicd) for how the two connect via a pinned tag).
 
 ## Architecture
 
@@ -465,9 +469,10 @@ against real `HTTP 403` responses, not from a single source of truth:
 - [ ] Move from a fixed node map to a reusable module (variable count,
       per-VM naming/IP)
 - [ ] Migrate onto dedicated hardware once available
-- [ ] Decide the fate of `swarm-lab`'s `Vagrantfile` now that this repo is
-      the working provisioning layer — keep as a local-only dev flow, or
-      remove
+- [x] `swarm-lab`'s `Vagrantfile` stays — deliberately kept so `swarm-lab`
+      remains a fully independent, self-contained project that can be spun
+      up on its own hardware without this repo. This repo is a separate,
+      Proxmox-specific provisioning path, not a replacement for it.
 - [ ] Give node/runner VMs an explicit serial console for consistency with
       the golden image and easier diagnosis when the guest agent is
       unreachable
