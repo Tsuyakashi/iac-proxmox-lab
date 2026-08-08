@@ -12,7 +12,7 @@ env:
   TF_VAR_proxmox_endpoint: ${{ secrets.PROXMOX_ENDPOINT }}
   TF_VAR_proxmox_api_token: ${{ secrets.PROXMOX_API_TOKEN }}
   TF_VAR_vm_ssh_public_key: ${{ secrets.VM_SSH_PUBLIC_KEY }}
-  TF_VAR_ci_ssh_public_key:   ${{ secrets.CI_SSH_PUBLIC_KEY }}
+  TF_VAR_ci_ssh_public_key: ${{ secrets.CI_SSH_PUBLIC_KEY }}
   AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
 
@@ -23,6 +23,16 @@ jobs:
       done: ${{ steps.apply.outcome }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up SSH key for Proxmox provider
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.CI_SSH_PRIVATE_KEY }}" > ~/.ssh/proxmox_provider_key
+          chmod 600 ~/.ssh/proxmox_provider_key
+          eval "$(ssh-agent -s)"
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+          ssh-add ~/.ssh/proxmox_provider_key
 
       - name: Terraform init
         run: terraform init
