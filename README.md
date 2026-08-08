@@ -219,6 +219,59 @@ Always run this by hand, never from the self-hosted runner's own CI job —
 that's the whole point of the split. See
 [Architecture](#two-independent-root-modules-on-purpose).
 
+### 7. Runner host prerequisites (manual, not yet automated)
+
+The golden image / cloud-init only sets up the SSH user and
+`qemu-guest-agent` — everything the CI job (`pipeline.yml`) actually needs
+to run has to be installed by hand on the runner VM after every
+`terraform apply` in `runner/`. Forgetting a step here is what actually
+burned a handful of pipeline re-runs, so: check this list before assuming
+the pipeline itself is broken.
+
+Required on the runner VM:
+
+- **`terraform`** — plus a `~/.terraformrc` with a network mirror, since
+  direct access to `registry.terraform.io` from this network isn't
+  reliable enough for unattended CI runs:
+
+  ```hcl
+  # ~/.terraformrc
+  provider_installation {
+    network_mirror {
+      url     = "https://terraform-mirror.yandexcloud.net/"
+      include = ["registry.terraform.io/*/*"]
+    }
+    direct {
+      exclude = ["registry.terraform.io/*/*"]
+    }
+  }
+  ```
+
+- **`docker.io`** — the GitHub Actions runner binary itself doesn't need
+  it, but nothing in the job currently does either; kept installed as a
+  baseline for anything Docker-adjacent added later.
+- **`curl`**, **`jq`** — used by the GitHub Actions runner scripts and
+  handy for ad-hoc debugging inside jobs.
+- **`ansible`** (`ansible-playbook`, `ansible-galaxy`) — runs the `deploy`
+  job's playbook from `swarm-lab`.
+- **MinIO client** — for poking at the state bucket (list objects, sanity
+  checks) from the runner without going through the Proxmox host.
+
+Quick check after any runner recreate:
+
+```bash
+which terraform ansible ansible-playbook ansible-galaxy docker
+```
+
+All five should resolve. If any are missing, the `pipeline.yml` job will
+fail well into the run (often after checkout/artifact steps already
+succeeded), which reads like a pipeline bug rather than a missing package —
+check this list first.
+
+This isn't scripted yet — see [Status](#status) — a natural next step is
+folding these into `runner/`'s cloud-init template or a small
+provisioning script run once per runner recreate.
+
 ## The `TerraformProv` role, and why it needs what it needs
 
 Proxmox's privilege model is granular enough that the "obvious" set of

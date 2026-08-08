@@ -23,6 +23,7 @@ resource "proxmox_virtual_environment_file" "cloud_init_user_data" {
     data = templatefile("${path.module}/cloud-init/user-data.yml.tpl", {
       ssh_public_key    = var.vm_ssh_public_key
       ci_ssh_public_key = var.ci_ssh_public_key
+      hostname          = each.key
     })
     file_name = "${each.key}-user-data.yml"
   }
