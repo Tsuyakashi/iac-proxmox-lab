@@ -4,7 +4,7 @@ resource "proxmox_virtual_environment_file" "runner_user_data" {
   node_name    = var.proxmox_node
 
   source_raw {
-    data = templatefile("${path.module}/cloud-init/user-data.yml.tpl", {
+    data = templatefile("${path.module}/../cloud-init/user-data.yml.tpl", {
       ssh_public_key    = var.vm_ssh_public_key
       ci_ssh_public_key = var.ci_ssh_public_key
     })
