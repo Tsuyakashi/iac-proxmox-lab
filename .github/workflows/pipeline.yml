@@ -15,6 +15,7 @@ env:
   TF_VAR_ci_ssh_public_key: ${{ secrets.CI_SSH_PUBLIC_KEY }}
   AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+  BASE_REGISTRY: ghcr.io/tsuyakashi/swarm-lab
 
 jobs:
   provision:
@@ -76,8 +77,8 @@ jobs:
           echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
           ssh-add ~/.ssh/id_ed25519
 
-      - name: Install Ansible collections
+      - name: Install Ansible collectionsenv.BASE_REGISTRY
         run: ansible-galaxy collection install -r swarm-lab/ansible/requirements.yml
 
       - name: Run playbook
-        run: ansible-playbook -i inventory.ini swarm-lab/ansible/site.yml
+        run: ansible-playbook -i inventory.ini swarm-lab/ansible/site.yml -e "base_registry=${{ env.BASE_REGISTRY }}"
