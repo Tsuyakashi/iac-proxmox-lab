@@ -96,6 +96,9 @@ troubleshooting notes.
 - **Ubuntu 24.04 (Noble) cloud image** — golden template, cloned per VM
 - **MinIO** (LXC, systemd daemon, no Docker) — S3-compatible Terraform state
   backend, independent of both the runner and the node VMs
+- **Ansible** — post-provision configuration, delegated to
+  [`swarm-lab`](../swarm-lab)'s playbook via a pinned git tag (see
+  [CI/CD](#cicd) below)
 
 ## Repo layout
 
@@ -107,6 +110,7 @@ backend.tf                            # S3 (MinIO/CT 200) backend config
 terraform.tfvars.example              # copy to terraform.tfvars, fill in secrets
 cloud-init/user-data.yml.tpl          # shared cloud-init template (users, packages, guest agent)
 templates/inventory.tpl               # ansible inventory template
+.github/workflows/pipeline.yml        # provision (terraform) + deploy (ansible against swarm-lab) CI
 runner/                               # SEPARATE root module — own state, own backend, own lifecycle
 ├── runner.tf                         #   ci-runner VM + its cloud-init file resource
 ├── providers.tf                      #   copy of the root provider config
@@ -272,6 +276,37 @@ This isn't scripted yet — see [Status](#status) — a natural next step is
 folding these into `runner/`'s cloud-init template or a small
 provisioning script run once per runner recreate.
 
+## CI/CD
+
+`.github/workflows/pipeline.yml` runs two jobs on the self-hosted runner,
+triggered on `workflow_dispatch` or a push to `main` touching `*.tf`,
+`cloud-init/**`, or `templates/**`:
+
+1. **provision** — `terraform apply` against the repo-root module
+   (`nodes.tf`), producing `inventory.ini` via the `local_file` resource and
+   uploading it as a build artifact.
+2. **deploy** — checks out this repo (for `inventory.ini`) alongside a
+   **pinned tag** of [`swarm-lab`](../swarm-lab) (currently `v0.3.3`, set via
+   `ref:` in the `Checkout swarm-lab` step), then runs
+   `swarm-lab/ansible/site.yml` against the freshly provisioned nodes.
+
+**Why a pinned tag instead of `main`:** the deploy job needs a stable,
+reproducible target — bumping the pin is a deliberate, visible action (a
+one-line diff in `pipeline.yml`) rather than silently picking up whatever
+`swarm-lab`'s `main` happens to be at trigger time. Bump the tag whenever
+`swarm-lab`'s `ansible/` tree (or anything else this pipeline depends on)
+changes in a way you want reflected here — see
+[swarm-lab's own README](../swarm-lab/README.md#cicd) for how its
+*application* images (nginx/python/nodejs/go) are versioned and deployed
+completely separately, by `swarm-lab`'s own CI, independent of this pin.
+
+Required repo/environment secrets: `PROXMOX_ENDPOINT`, `PROXMOX_API_TOKEN`,
+`VM_SSH_PUBLIC_KEY`, `CI_SSH_PUBLIC_KEY`, `CI_SSH_PRIVATE_KEY`,
+`MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `GH_RUNNER_PAT` (classic PAT with
+`repo` scope, or fine-grained with `Administration: read/write` on
+`swarm-lab` — used by the `github-runner` Ansible role to register a runner
+on the freshly provisioned `prod-node`).
+
 ## The `TerraformProv` role, and why it needs what it needs
 
 Proxmox's privilege model is granular enough that the "obvious" set of
@@ -371,6 +406,46 @@ against real `HTTP 403` responses, not from a single source of truth:
   bridge/nested-KVM setup — pinging from the physical host itself was
   consistently sub-millisecond.
 
+- **`deploy` job's `github-runner` Ansible role failed silently on a
+  registration-token 404, because the workflow never set `GITHUB_REPO`.**
+  The role reads both `GITHUB_REPO` and `GITHUB_PAT` from the environment
+  (`lookup('env', ...)`), but `pipeline.yml`'s `env:` block only ever had
+  `BASE_REGISTRY`. With `github_repo` empty, the registration-token request
+  went to `.../repos//actions/runners/registration-token`, GitHub returned a
+  non-201 status, and the `uri` module failed the task — but the actual
+  response body was hidden because the *whole task* (not just the token
+  taskss) had `no_log: true`. Fixed by adding `GITHUB_REPO:
+  Tsuyakashi/swarm-lab` alongside `GITHUB_PAT` in `pipeline.yml`'s `env:`
+  block. Lesson: when a `no_log: true` task fails opaquely, temporarily
+  register the result and drop `no_log` on that one task rather than
+  guessing — two earlier guesses here (missing runner dependencies) were
+  both wrong.
+
+- **`Configure runner` failed with `Permission denied:
+  '/root/actions-runner'` even though the files were downloaded to
+  `/home/<user>/actions-runner`.** The `Setup GitHub Actions runner` play
+  in `swarm-lab/ansible/site.yml` runs with `become: true` at the play
+  level, which applies to `Gathering Facts` too — so
+  `ansible_env.HOME` resolves to `/root`, not the SSH user's home. A
+  `runner_dir` default built from `ansible_env.HOME` therefore pointed at
+  `/root/actions-runner` for the `become_user: <ssh-user>` task, even
+  though the directory-creation tasks (running as root, then chowned)
+  had populated `/home/<user>/actions-runner`. Fixed by building
+  `runner_dir` explicitly as `/home/{{ ansible_user }}/actions-runner`
+  in `github-runner/defaults/main.yml` instead of trusting
+  `ansible_env.HOME` inside a `become: true` play.
+
+- **The `docker` and `github-runner` Ansible roles hardcoded the `vagrant`
+  user**, a leftover from the original `vagrant up` flow (Vagrant boxes
+  auto-provision a `vagrant` system user). Nodes provisioned by this repo's
+  Terraform + cloud-init use `ubuntu` instead (see
+  `cloud-init/user-data.yml.tpl`), and `vagrant` only existed on them as an
+  *accidental* side effect of the `user:` task in the `docker` role
+  (which happened to create it, since it wasn't `state: absent`). Fixed by
+  parameterizing both roles on `ansible_user` (already correctly populated
+  per-host by both the Vagrant provisioner and `templates/inventory.tpl`),
+  so neither role assumes a specific provisioning flow anymore.
+
 ## Status
 
 - [x] Nested Proxmox VE running, reachable on the LAN
@@ -381,11 +456,21 @@ against real `HTTP 403` responses, not from a single source of truth:
 - [x] Runner split into an independent root module with its own backend
 - [x] State backend (MinIO/CT 200) moved off both the runner and the node
       VMs it describes
+- [x] Full `provision` → `deploy` pipeline green end-to-end: Terraform
+      provisions nodes, Ansible (pinned `swarm-lab` tag) bootstraps Docker,
+      Swarm, stack deploy, and self-hosted runner registration, all
+      unattended
+- [x] `docker`/`github-runner` Ansible roles are provisioning-flow
+      agnostic (`ansible_user`-driven), no more hardcoded `vagrant`
 - [ ] Move from a fixed node map to a reusable module (variable count,
       per-VM naming/IP)
 - [ ] Migrate onto dedicated hardware once available
-- [ ] Consider using this as the provisioning layer for `swarm-lab` /
-      `poly-ci` node VMs, replacing their current Vagrant setup
+- [ ] Decide the fate of `swarm-lab`'s `Vagrantfile` now that this repo is
+      the working provisioning layer — keep as a local-only dev flow, or
+      remove
 - [ ] Give node/runner VMs an explicit serial console for consistency with
       the golden image and easier diagnosis when the guest agent is
       unreachable
+- [ ] Fold runner host prerequisites (§7) into `runner/`'s cloud-init or a
+      provisioning script, so a runner recreate doesn't need a manual
+      dependency pass
