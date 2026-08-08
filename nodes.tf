@@ -82,7 +82,10 @@ output "node_ips" {
   description = "Real IP from DHCP (with qemu-guest-agent)"
   value = {
     for k, v in proxmox_virtual_environment_vm.node :
-    k => [for ip in v.ipv4_addresses : ip if !startswith(ip[0], "127.")][0][0]
+    k => try(
+      [for ip in v.ipv4_addresses : ip if !startswith(ip[0], "127.")][0][0],
+      "unknown"
+    )
   }
 }
 
