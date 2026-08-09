@@ -175,14 +175,14 @@ scripts/
   `nodes/terraform.tfstate` to make room for other environments in the same
   bucket later — **this requires `terraform init -migrate-state` (or a
   manual state copy in MinIO) when adopting this layout on an existing
-  state file**, it's not a no-op rename.
+  state file**, it's not a no-op rename. Performed by hand on this repo's own state during PR #23.
 - Moving the VM/cloud-init resources into `modules/proxmox-vm` also meant
   they picked up new state addresses (`module.node["..."]....` instead of
   the old flat `proxmox_virtual_environment_vm.node["..."]`). Adopting this
   layout on existing state needs `moved` blocks mapping the old addresses
   to the new ones — otherwise Terraform reads the rename as
   destroy-old/create-new and will happily recreate every live VM. Add them
-  temporarily, `apply` once, then they can be deleted.
+  temporarily, `apply` once, then they can be deleted. This is exactly what was done here — the blocks were added, applied once with no destroy/create in the plan, then removed.
 
 ## Quickstart
 
