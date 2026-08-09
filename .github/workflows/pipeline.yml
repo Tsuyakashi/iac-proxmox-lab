@@ -44,17 +44,11 @@ jobs:
         id: apply
         run: terraform apply -auto-approve -parallelism=1
 
-      - name: Upload inventory
-        uses: actions/upload-artifact@v4
-        with:
-          name: inventory
-          path: inventory.ini
-
   deploy:
     needs: provision
     runs-on: self-hosted
     steps:
-      - name: Checkout iac-proxmox-lab (for inventory.ini on disk)
+      - name: Checkout iac-proxmox-lab (for ansible-inventory/)
         uses: actions/checkout@v4
 
       - name: Checkout swarm-lab
@@ -63,11 +57,6 @@ jobs:
           repository: Tsuyakashi/swarm-lab
           ref: v0.3.3
           path: swarm-lab
-
-      - name: Download inventory
-        uses: actions/download-artifact@v4
-        with:
-          name: inventory
 
       - name: Set up SSH key for Ansible
         run: |
@@ -80,7 +69,13 @@ jobs:
           ssh-add ~/.ssh/id_ed25519
 
       - name: Install Ansible collectionsenv.BASE_REGISTRY
-        run: ansible-galaxy collection install -r swarm-lab/ansible/requirements.yml
-
+        run: |
+          ansible-galaxy collection install -r swarm-lab/ansible/requirements.yml
+          ansible-galaxy collection install -r ansible-inventory/requirements.yml
+ 
       - name: Run playbook
-        run: ansible-playbook -i inventory.ini swarm-lab/ansible/site.yml -e "base_registry=${{ env.BASE_REGISTRY }}"
+        env:
+          PROXMOX_ENDPOINT: ${{ secrets.PROXMOX_ENDPOINT }}
+          PROXMOX_TOKEN_ID: ${{ secrets.PROXMOX_TOKEN_ID }}
+          PROXMOX_TOKEN_SECRET: ${{ secrets.PROXMOX_TOKEN_SECRET }}
+        run: ansible-playbook -i ansible-inventory/proxmox.proxmox.yml swarm-lab/ansible/site.yml -e "base_registry=${{ env.BASE_REGISTRY }}"
