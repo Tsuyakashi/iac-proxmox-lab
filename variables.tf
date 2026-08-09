@@ -36,3 +36,9 @@ variable "ci_ssh_public_key" {
   description = "Public key for CI/CD deploy access (no passphrase, dedicated to automation)"
   type        = string
 }
+
+variable "gateway" {
+  description = "LAN gateway for statically-addressed nodes"
+  type        = string
+  default     = "192.168.100.1"
+}

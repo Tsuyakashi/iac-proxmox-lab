@@ -44,15 +44,19 @@ jobs:
         id: apply
         run: terraform apply -auto-approve -parallelism=1
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inventory
+          path: inventory.ini
+
   deploy:
     needs: provision
     runs-on: self-hosted
     steps:
-      - name: Checkout iac-proxmox-lab (for ansible-inventory/)
-        uses: actions/checkout@v4
-
-      - name: Checkout swarm-lab
-        uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: inventory
+      - uses: actions/checkout@v4
         with:
           repository: Tsuyakashi/swarm-lab
           ref: v0.3.3
@@ -71,11 +75,6 @@ jobs:
       - name: Install Ansible collectionsenv.BASE_REGISTRY
         run: |
           ansible-galaxy collection install -r swarm-lab/ansible/requirements.yml
-          ansible-galaxy collection install -r ansible-inventory/requirements.yml
  
       - name: Run playbook
-        env:
-          PROXMOX_ENDPOINT: ${{ secrets.PROXMOX_ENDPOINT }}
-          PROXMOX_TOKEN_ID: ${{ secrets.PROXMOX_TOKEN_ID }}
-          PROXMOX_TOKEN_SECRET: ${{ secrets.PROXMOX_TOKEN_SECRET }}
-        run: ansible-playbook -i ansible-inventory/proxmox.proxmox.yml swarm-lab/ansible/site.yml -e "base_registry=${{ env.BASE_REGISTRY }}"
+        run: ansible-playbook -i inventory.ini swarm-lab/ansible/site.yml -e "base_registry=${{ env.BASE_REGISTRY }}"
