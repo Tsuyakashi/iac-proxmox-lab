@@ -6,7 +6,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['*.tf', 'cloud-init/**', 'templates/**']
+    # modules/** — потому что environments/nodes зависит от modules/proxmox-vm;
+    # правки модуля должны прогонять тот же apply, что и правки самого environment.
+    paths: ['environments/nodes/**', 'modules/**']
 
 env:
   TF_VAR_proxmox_endpoint: ${{ secrets.PROXMOX_ENDPOINT }}
@@ -22,6 +24,9 @@ env:
 jobs:
   provision:
     runs-on: self-hosted
+    defaults:
+      run:
+        working-directory: environments/nodes
     outputs:
       done: ${{ steps.apply.outcome }}
     steps:
@@ -47,7 +52,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: inventory
-          path: inventory.ini
+          path: environments/nodes/inventory.ini
 
   deploy:
     needs: provision
@@ -72,9 +77,9 @@ jobs:
           echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
           ssh-add ~/.ssh/id_ed25519
 
-      - name: Install Ansible collectionsenv.BASE_REGISTRY
+      - name: Install Ansible collections
         run: |
           ansible-galaxy collection install -r swarm-lab/ansible/requirements.yml
- 
+
       - name: Run playbook
         run: ansible-playbook -i inventory.ini swarm-lab/ansible/site.yml -e "base_registry=${{ env.BASE_REGISTRY }}"

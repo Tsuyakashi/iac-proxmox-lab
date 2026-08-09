@@ -42,3 +42,19 @@ variable "gateway" {
   type        = string
   default     = "192.168.100.1"
 }
+
+variable "nodes" {
+  description = "Nodes topology. mac + ip are both pinned — ip is applied via cloud-init static config, not DHCP, so Proxmox/router never gets a say in which address a node ends up with."
+  type = map(object({
+    tag_name = string
+    memory   = number
+    cores    = number
+    mac      = string
+    ip       = string # CIDR, e.g. "192.168.100.21/24"
+  }))
+  default = {
+    "prod-node"  = { tag_name = "prod", memory = 2048, cores = 2, mac = "BC:24:11:B4:5A:47", ip = "192.168.100.101/24" }
+    "stage-node" = { tag_name = "stage", memory = 1024, cores = 1, mac = "BC:24:11:25:44:C6", ip = "192.168.100.102/24" }
+    "dev-node"   = { tag_name = "dev", memory = 1024, cores = 1, mac = "BC:24:11:86:AB:E2", ip = "192.168.100.103/24" }
+  }
+}
