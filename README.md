@@ -27,10 +27,10 @@ this repo (see [CI/CD](#cicd) for how the two connect via a pinned tag).
 │               ├── CT 200: minio (LXC, systemd daemon)           │
 │               │     — Terraform state backend, NOT managed      │
 │               │       by Terraform itself                       │
-│               ├── VM: ci-runner (root module: runner/)          │
+│               ├── VM: ci-runner (root module: environments/runner/) │
 │               │     — GitHub Actions self-hosted runner         │
 │               └── VM: prod-node / stage-node / dev-node         │
-│                     (root module: repo root, nodes.tf)          │
+│                     (root module: environments/nodes/)          │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -51,8 +51,9 @@ the host, so the 18GB doesn't compete with them for host resources.
 
 ### Two independent root modules, on purpose
 
-The repo root (`nodes.tf`) and `runner/` are **two separate Terraform root
-modules**, each with its own backend, state, and lifecycle. This is not
+`environments/nodes/` and `environments/runner/` are **two separate
+Terraform root modules**, each with its own backend, state, and lifecycle,
+both built from the same shared `modules/proxmox-vm`. This is not
 incidental structure — it's the fix for an actual incident: the CI runner
 used to live in the same state/config as the nodes it provisions. A routine
 change to the shared cloud-init template forced a replace on every resource
@@ -62,15 +63,17 @@ while running that very `apply`. See
 below for the full story.
 
 Consequences of the split:
-- `terraform apply` in the repo root never touches the runner, and vice
-  versa — no shared blast radius.
+- `terraform apply` in `environments/nodes/` never touches the runner, and
+  vice versa — no shared blast radius.
 - The runner is applied **manually, from a laptop**, never from CI on
-  itself. `runner/` uses a local backend (state file committed to the
-  runner's own lifecycle, not S3) since it's touched rarely and by hand.
-- `pipeline.yml`'s `paths: ['*.tf', ...]` filter is non-recursive, so pushes
-  under `runner/**` don't trigger the CI job on the nodes — this was true
-  before the split too, but now it's structurally reinforced rather than
-  accidental.
+  itself. `environments/runner/` uses a local backend (state file lives
+  with the runner's own lifecycle, not S3) since it's touched rarely and by
+  hand.
+- `pipeline.yml`'s `paths: ['environments/nodes/**', 'modules/**']` filter
+  means pushes under `environments/runner/**` don't trigger the CI job on
+  the nodes — this was true before the split too, but now it's structurally
+  reinforced rather than accidental. Changes under `modules/**` *do*
+  trigger it, since `environments/nodes` depends on that module.
 
 ### State backend lives off both
 
@@ -106,26 +109,80 @@ troubleshooting notes.
 
 ## Repo layout
 
+Standard `modules/` + `environments/` split. `modules/proxmox-vm` is the one
+reusable building block — a single cloned VM with a cloud-init snippet — and
+both root modules (`environments/nodes`, `environments/runner`) call it. The
+module owns no backend and no provider config; each environment configures
+those independently, which is what actually enforces the state/lifecycle
+separation described below (not just a folder convention).
+
 ```
-nodes.tf                              # node VMs (prod/stage/dev) + ansible inventory generation
-providers.tf                          # Terraform + Proxmox provider config (repo-root module)
-variables.tf                          # input variable declarations (repo-root module)
-backend.tf                            # S3 (MinIO/CT 200) backend config
-terraform.tfvars.example              # copy to terraform.tfvars, fill in secrets
-cloud-init/user-data.yml.tpl          # shared cloud-init template (users, packages, guest agent)
-templates/inventory.tpl               # ansible inventory template
-.github/workflows/pipeline.yml        # provision (terraform) + deploy (ansible against swarm-lab) CI
-runner/                               # SEPARATE root module — own state, own backend, own lifecycle
-├── runner.tf                         #   ci-runner VM + its cloud-init file resource
-├── providers.tf                      #   copy of the root provider config
-├── variables.tf                      #   only the vars runner.tf actually needs
-├── backend.tf                        #   local backend — applied manually, not from CI
-└── terraform.tfvars.example
+modules/
+└── proxmox-vm/                       # reusable module — no backend, no provider block
+    ├── main.tf                       #   VM + cloud-init file resource
+    ├── variables.tf                  #   name, sizing, ip_config (static|dhcp), ssh keys...
+    ├── versions.tf                   #   required_version + required_providers
+    ├── outputs.tf                    #   vm_id, ipv4_addresses
+    ├── README.md
+    └── templates/user-data.yml.tpl   #   cloud-init template (users, packages, guest agent)
+
+environments/
+├── nodes/                            # ROOT MODULE — prod/stage/dev nodes
+│   ├── main.tf                       #   for_each over var.nodes -> module "node"
+│   ├── variables.tf                  #   incl. the "nodes" topology map
+│   ├── outputs.tf                    #   node_ids, node_ips, inventory_path
+│   ├── providers.tf
+│   ├── backend.tf                    #   S3 (MinIO/CT 200)
+│   ├── terraform.tfvars.example
+│   └── templates/inventory.tpl       #   ansible inventory template (used only here)
+└── runner/                           # ROOT MODULE — CI runner, own state/lifecycle
+    ├── main.tf                       #   single module "ci_runner" call, dhcp
+    ├── variables.tf
+    ├── outputs.tf                    #   ci_runner_ip
+    ├── providers.tf
+    ├── backend.tf                    #   local backend — applied manually, not from CI
+    └── terraform.tfvars.example
+
+.github/workflows/pipeline.yml        # provision (terraform, environments/nodes) + deploy (ansible)
 scripts/
 ├── install-proxmox-with-libvirt.sh   # host-side: creates the nested Proxmox VM
 ├── proxmox-init.sh                   # Proxmox-side: terraform user/role/token, golden image
 └── minio-lxc-init.sh                 # Proxmox-side: MinIO LXC (state backend), NOT terraform-managed
 ```
+
+**What changed vs. the original flat layout**, and why:
+
+- `nodes.tf` + `runner/runner.tf`'s VM/cloud-init resources merged into one
+  module, `modules/proxmox-vm` — they were near-identical resource blocks
+  (VM + cloud-init file) with different inputs. Duplicating them was the
+  actual blocker for the "reusable module, variable node count" item that
+  used to sit in Status/TODO; now it's just `for_each` over the module.
+- `cloud-init/user-data.yml.tpl` moved inside the module
+  (`modules/proxmox-vm/templates/`) — it's an implementation detail of "how
+  a VM is built," not something either environment should reach into
+  directly.
+- `templates/inventory.tpl` moved into `environments/nodes/` — only that
+  one root module ever uses it; keeping it at the repo root implied it was
+  shared, which it wasn't.
+- Fixed a latent bug in the process: the old `runner/runner.tf` called
+  `templatefile()` without a `hostname` value even though the template
+  requires `${hostname}` — this would fail at apply time. The module now
+  defaults `hostname` to the VM name.
+- `environments/nodes/outputs.tf` is new — the old repo-root module had no
+  outputs at all (`runner/` did). Now both expose `vm_id`/IP info instead
+  of requiring a state-file grep to check what got provisioned.
+- `backend.tf`'s S3 `key` changed from `terraform.tfstate` to
+  `nodes/terraform.tfstate` to make room for other environments in the same
+  bucket later — **this requires `terraform init -migrate-state` (or a
+  manual state copy in MinIO) when adopting this layout on an existing
+  state file**, it's not a no-op rename.
+- Moving the VM/cloud-init resources into `modules/proxmox-vm` also meant
+  they picked up new state addresses (`module.node["..."]....` instead of
+  the old flat `proxmox_virtual_environment_vm.node["..."]`). Adopting this
+  layout on existing state needs `moved` blocks mapping the old addresses
+  to the new ones — otherwise Terraform reads the rename as
+  destroy-old/create-new and will happily recreate every live VM. Add them
+  temporarily, `apply` once, then they can be deleted.
 
 ## Quickstart
 
@@ -197,12 +254,14 @@ systemd service. Not a Terraform resource by design — see
 and console URL on success.
 
 Then, via the printed console URL, create a bucket named
-`iac-proxmox-lab-tfstate` and update `endpoints.s3` in `backend.tf` to match
-the printed IP if it differs from what's currently committed.
+`iac-proxmox-lab-tfstate` and update `endpoints.s3` in
+`environments/nodes/backend.tf` to match the printed IP if it differs from
+what's currently committed.
 
 ### 5. Provision the nodes
 
 ```bash
+cd environments/nodes/
 cp terraform.tfvars.example terraform.tfvars   # fill in endpoint, token, SSH keys
 export AWS_ACCESS_KEY_ID=<minio-user>
 export AWS_SECRET_ACCESS_KEY=<minio-password>
@@ -217,8 +276,8 @@ setup are unreliable.
 ### 6. (Optional, manual, rare) Provision the CI runner
 
 ```bash
-cd runner/
-cp terraform.tfvars.example terraform.tfvars   # same values as the root tfvars
+cd environments/runner/
+cp terraform.tfvars.example terraform.tfvars   # same values as the nodes tfvars
 terraform init
 terraform apply
 ```
@@ -283,12 +342,17 @@ provisioning script run once per runner recreate.
 ## CI/CD
 
 `.github/workflows/pipeline.yml` runs two jobs on the self-hosted runner,
-triggered on `workflow_dispatch` or a push to `main` touching `*.tf`,
-`cloud-init/**`, or `templates/**`:
+triggered on `workflow_dispatch` or a push to `main` touching
+`environments/nodes/**` or `modules/**` (the latter because
+`environments/nodes` depends on `modules/proxmox-vm` — a module change
+needs the same `apply` as an environment change; see
+[Architecture](#two-independent-root-modules-on-purpose)). Pushes under
+`environments/runner/**` deliberately do **not** trigger this workflow —
+the runner is applied by hand, never from its own CI job.
 
-1. **provision** — `terraform apply` against the repo-root module
-   (`nodes.tf`), producing `inventory.ini` via the `local_file` resource and
-   uploading it as a build artifact.
+1. **provision** — `terraform apply` against the `environments/nodes` root
+   module, producing `environments/nodes/inventory.ini` via the `local_file`
+   resource and uploading it as a build artifact.
 2. **deploy** — checks out this repo (for `inventory.ini`) alongside a
    **pinned tag** of [`swarm-lab`](../swarm-lab) (currently `v0.3.3`, set via
    `ref:` in the `Checkout swarm-lab` step), then runs
@@ -337,8 +401,9 @@ against real `HTTP 403` responses, not from a single source of truth:
   resource — including the runner VM the job was executing on. Terraform
   began destroying the runner's own VM; the job got a shutdown signal
   mid-destroy and never completed the recreate. Fixed by splitting the
-  runner into its own root module (`runner/`, own state, own backend,
-  applied manually — see [Architecture](#two-independent-root-modules-on-purpose)).
+  runner into its own root module (`environments/runner/`, own state, own
+  backend, applied manually — see
+  [Architecture](#two-independent-root-modules-on-purpose)).
 
 - **State backend became unreachable after the above.** MinIO was running
   *inside* the runner VM. Once the runner destroyed itself, every
@@ -396,8 +461,9 @@ against real `HTTP 403` responses, not from a single source of truth:
 
 - **`qemu-guest-agent` not running → 15-minute `apply` timeout.** The Ubuntu
   cloud image ships the agent package but doesn't enable it by default.
-  Fixed by pushing a cloud-init snippet (`cloud-init/user-data.yml.tpl`) that
-  installs and enables it via `runcmd`, instead of relying on the base image.
+  Fixed by pushing a cloud-init snippet (now
+  `modules/proxmox-vm/templates/user-data.yml.tpl`) that installs and
+  enables it via `runcmd`, instead of relying on the base image.
 
 - **`user_account` block vs `user_data_file_id`.** These both generate
   cloud-init user-data; setting `user_data_file_id` takes over entirely, so
@@ -443,12 +509,13 @@ against real `HTTP 403` responses, not from a single source of truth:
   user**, a leftover from the original `vagrant up` flow (Vagrant boxes
   auto-provision a `vagrant` system user). Nodes provisioned by this repo's
   Terraform + cloud-init use `ubuntu` instead (see
-  `cloud-init/user-data.yml.tpl`), and `vagrant` only existed on them as an
-  *accidental* side effect of the `user:` task in the `docker` role
-  (which happened to create it, since it wasn't `state: absent`). Fixed by
-  parameterizing both roles on `ansible_user` (already correctly populated
-  per-host by both the Vagrant provisioner and `templates/inventory.tpl`),
-  so neither role assumes a specific provisioning flow anymore.
+  `modules/proxmox-vm/templates/user-data.yml.tpl`), and `vagrant` only
+  existed on them as an *accidental* side effect of the `user:` task in the
+  `docker` role (which happened to create it, since it wasn't
+  `state: absent`). Fixed by parameterizing both roles on `ansible_user`
+  (already correctly populated per-host by both the Vagrant provisioner
+  and `templates/inventory.tpl`), so neither role assumes a specific
+  provisioning flow anymore.
 
 ## Status
 
@@ -466,8 +533,13 @@ against real `HTTP 403` responses, not from a single source of truth:
       unattended
 - [x] `docker`/`github-runner` Ansible roles are provisioning-flow
       agnostic (`ansible_user`-driven), no more hardcoded `vagrant`
-- [ ] Move from a fixed node map to a reusable module (variable count,
-      per-VM naming/IP)
+- [x] Node/runner VM provisioning extracted into a reusable module
+      (`modules/proxmox-vm`) shared by both root modules — no more
+      duplicated resource blocks between `nodes.tf` and `runner/runner.tf`.
+      Node *count* is still driven by the `var.nodes` map's default value
+      (not yet parameterized from outside the module/environment), so
+      adding a node today still means editing that default rather than
+      passing in a wholly external topology.
 - [ ] Migrate onto dedicated hardware once available
 - [x] `swarm-lab`'s `Vagrantfile` stays — deliberately kept so `swarm-lab`
       remains a fully independent, self-contained project that can be spun

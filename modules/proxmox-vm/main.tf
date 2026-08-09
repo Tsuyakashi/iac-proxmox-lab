@@ -1,0 +1,86 @@
+# modules/proxmox-vm
+#
+# Единица провижининга: одна VM, клонированная из golden image, с cloud-init
+# снипетом (пользователь + guest agent + hostname) и либо статическим, либо
+# dhcp-адресом. Используется обоими root-модулями (environments/nodes,
+# environments/runner) — единственный источник правды для "как выглядит VM
+# в этом Proxmox-кластере".
+#
+# Модуль намеренно НЕ содержит:
+#   - backend { }        — решает root-модуль
+#   - provider "proxmox"  — конфигурация провайдера (endpoint/token/ssh)
+#                            тоже решает root-модуль
+# Это стандартное правило: модуль описывает "что" создавать, а не "куда
+# катить state" и "с каким аккаунтом ходить в API".
+
+locals {
+  # Хостнейм внутри гостя по умолчанию = имя ресурса, но можно переопределить
+  hostname = coalesce(var.hostname, var.name)
+}
+
+resource "proxmox_virtual_environment_file" "cloud_init_user_data" {
+  content_type = "snippets"
+  datastore_id = var.datastore_id_snippet
+  node_name    = var.proxmox_node
+
+  source_raw {
+    data = templatefile("${path.module}/templates/user-data.yml.tpl", {
+      ssh_public_key    = var.vm_ssh_public_key
+      ci_ssh_public_key = var.ci_ssh_public_key
+      hostname          = local.hostname
+    })
+    file_name = "${var.name}-user-data.yml"
+  }
+}
+
+resource "proxmox_virtual_environment_vm" "this" {
+  name      = var.name
+  node_name = var.proxmox_node
+  tags      = var.tags
+
+  clone {
+    vm_id = var.template_vm_id
+    full  = true
+  }
+
+  agent {
+    enabled = true
+
+    wait_for_ip {
+      disabled = var.wait_for_ip_disabled
+    }
+  }
+
+  cpu {
+    cores = var.cores
+  }
+
+  memory {
+    dedicated = var.memory
+  }
+
+  disk {
+    datastore_id = var.datastore_id_disk
+    interface    = "scsi0"
+    size         = var.disk_size
+  }
+
+  network_device {
+    bridge      = "vmbr0"
+    mac_address = var.mac_address
+  }
+
+  initialization {
+    ip_config {
+      ipv4 {
+        address = var.ip_config.mode == "static" ? var.ip_config.address : "dhcp"
+        gateway = var.ip_config.mode == "static" ? var.ip_config.gateway : null
+      }
+    }
+    user_data_file_id = proxmox_virtual_environment_file.cloud_init_user_data.id
+  }
+
+  operating_system {
+    type = "l26"
+  }
+}
