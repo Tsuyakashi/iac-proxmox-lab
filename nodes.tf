@@ -1,14 +1,16 @@
 variable "nodes" {
-  description = "Nodes topology, mirrors NODES-hash from Tsuyakashi/swarm-lab/Vagrantfile"
+  description = "Nodes topology, mirrors NODES-hash from Tsuyakashi/swarm-lab/Vagrantfile. mac is pinned explicitly and reserved on the router's DHCP server; ip is the address the router hands out for that reservation — not agent-discovered."
   type = map(object({
     tag_name = string
     memory   = number
     cores    = number
+    mac      = string
+    ip       = string
   }))
   default = {
-    "prod-node"  = { tag_name = "prod", memory = 2048, cores = 2 }
-    "stage-node" = { tag_name = "stage", memory = 1024, cores = 1 }
-    "dev-node"   = { tag_name = "dev", memory = 1024, cores = 1 }
+    "prod-node"  = { tag_name = "prod", memory = 2048, cores = 2, mac = "BC:24:11:B4:5A:47", ip = "192.168.100.101" }
+    "stage-node" = { tag_name = "stage", memory = 1024, cores = 1, mac = "BC:24:11:25:44:C6", ip = "192.168.100.102" }
+    "dev-node"   = { tag_name = "dev", memory = 1024, cores = 1, mac = "BC:24:11:86:AB:E2", ip = "192.168.100.103" }
   }
 }
 
@@ -43,6 +45,13 @@ resource "proxmox_virtual_environment_vm" "node" {
 
   agent {
     enabled = true
+
+    # We no longer resolve IPs from the agent (see network_device/mac_address
+    # below + router-side DHCP reservation) — skip the lookup entirely so
+    # apply/refresh never blocks on or drifts because of agent timing.
+    wait_for_ip {
+      disabled = true
+    }
   }
 
   cpu {
@@ -60,13 +69,14 @@ resource "proxmox_virtual_environment_vm" "node" {
   }
 
   network_device {
-    bridge = "vmbr0"
+    bridge      = "vmbr0"
+    mac_address = each.value.mac
   }
 
   initialization {
     ip_config {
       ipv4 {
-        address = "dhcp"
+        address = "dhcp" # still DHCP — just a reserved lease for this MAC on the router
       }
     }
 
@@ -79,26 +89,17 @@ resource "proxmox_virtual_environment_vm" "node" {
 }
 
 output "node_ips" {
-  description = "Real IP from DHCP (with qemu-guest-agent)"
-  value = {
-    for k, v in proxmox_virtual_environment_vm.node :
-    k => try(
-      [for ip in v.ipv4_addresses : ip if !startswith(ip[0], "127.")][0][0],
-      "unknown"
-    )
-  }
+  description = "Reserved IPs from var.nodes — must match the DHCP reservations configured on the router for each node's mac"
+  value       = { for k, v in var.nodes : k => v.ip }
 }
 
 resource "local_file" "ansible_inventory" {
   filename = "${path.module}/inventory.ini"
   content = templatefile("${path.module}/templates/inventory.tpl", {
     nodes = {
-      for k, v in proxmox_virtual_environment_vm.node : k => {
-        ip = try(
-          [for ip in v.ipv4_addresses : ip if !startswith(ip[0], "127.")][0][0],
-          "unknown"
-        )
-        tag_name = var.nodes[k].tag_name
+      for k, v in var.nodes : k => {
+        ip       = v.ip
+        tag_name = v.tag_name
       }
     }
   })
