@@ -121,6 +121,7 @@ modules/
 └── proxmox-vm/                       # reusable module — no backend, no provider block
     ├── main.tf                       #   VM + cloud-init file resource
     ├── variables.tf                  #   name, sizing, ip_config (static|dhcp), ssh keys...
+    ├── versions.tf                   #   required_version + required_providers
     ├── outputs.tf                    #   vm_id, ipv4_addresses
     ├── README.md
     └── templates/user-data.yml.tpl   #   cloud-init template (users, packages, guest agent)
@@ -175,6 +176,13 @@ scripts/
   bucket later — **this requires `terraform init -migrate-state` (or a
   manual state copy in MinIO) when adopting this layout on an existing
   state file**, it's not a no-op rename.
+- Moving the VM/cloud-init resources into `modules/proxmox-vm` also meant
+  they picked up new state addresses (`module.node["..."]....` instead of
+  the old flat `proxmox_virtual_environment_vm.node["..."]`). Adopting this
+  layout on existing state needs `moved` blocks mapping the old addresses
+  to the new ones — otherwise Terraform reads the rename as
+  destroy-old/create-new and will happily recreate every live VM. Add them
+  temporarily, `apply` once, then they can be deleted.
 
 ## Quickstart
 
@@ -334,8 +342,13 @@ provisioning script run once per runner recreate.
 ## CI/CD
 
 `.github/workflows/pipeline.yml` runs two jobs on the self-hosted runner,
-triggered on `workflow_dispatch` or a push to `main` touching `*.tf`,
-`cloud-init/**`, or `templates/**`:
+triggered on `workflow_dispatch` or a push to `main` touching
+`environments/nodes/**` or `modules/**` (the latter because
+`environments/nodes` depends on `modules/proxmox-vm` — a module change
+needs the same `apply` as an environment change; see
+[Architecture](#two-independent-root-modules-on-purpose)). Pushes under
+`environments/runner/**` deliberately do **not** trigger this workflow —
+the runner is applied by hand, never from its own CI job.
 
 1. **provision** — `terraform apply` against the `environments/nodes` root
    module, producing `environments/nodes/inventory.ini` via the `local_file`
@@ -448,8 +461,9 @@ against real `HTTP 403` responses, not from a single source of truth:
 
 - **`qemu-guest-agent` not running → 15-minute `apply` timeout.** The Ubuntu
   cloud image ships the agent package but doesn't enable it by default.
-  Fixed by pushing a cloud-init snippet (`cloud-init/user-data.yml.tpl`) that
-  installs and enables it via `runcmd`, instead of relying on the base image.
+  Fixed by pushing a cloud-init snippet (now
+  `modules/proxmox-vm/templates/user-data.yml.tpl`) that installs and
+  enables it via `runcmd`, instead of relying on the base image.
 
 - **`user_account` block vs `user_data_file_id`.** These both generate
   cloud-init user-data; setting `user_data_file_id` takes over entirely, so
@@ -495,12 +509,13 @@ against real `HTTP 403` responses, not from a single source of truth:
   user**, a leftover from the original `vagrant up` flow (Vagrant boxes
   auto-provision a `vagrant` system user). Nodes provisioned by this repo's
   Terraform + cloud-init use `ubuntu` instead (see
-  `cloud-init/user-data.yml.tpl`), and `vagrant` only existed on them as an
-  *accidental* side effect of the `user:` task in the `docker` role
-  (which happened to create it, since it wasn't `state: absent`). Fixed by
-  parameterizing both roles on `ansible_user` (already correctly populated
-  per-host by both the Vagrant provisioner and `templates/inventory.tpl`),
-  so neither role assumes a specific provisioning flow anymore.
+  `modules/proxmox-vm/templates/user-data.yml.tpl`), and `vagrant` only
+  existed on them as an *accidental* side effect of the `user:` task in the
+  `docker` role (which happened to create it, since it wasn't
+  `state: absent`). Fixed by parameterizing both roles on `ansible_user`
+  (already correctly populated per-host by both the Vagrant provisioner
+  and `templates/inventory.tpl`), so neither role assumes a specific
+  provisioning flow anymore.
 
 ## Status
 
@@ -518,8 +533,13 @@ against real `HTTP 403` responses, not from a single source of truth:
       unattended
 - [x] `docker`/`github-runner` Ansible roles are provisioning-flow
       agnostic (`ansible_user`-driven), no more hardcoded `vagrant`
-- [ ] Move from a fixed node map to a reusable module (variable count,
-      per-VM naming/IP)
+- [x] Node/runner VM provisioning extracted into a reusable module
+      (`modules/proxmox-vm`) shared by both root modules — no more
+      duplicated resource blocks between `nodes.tf` and `runner/runner.tf`.
+      Node *count* is still driven by the `var.nodes` map's default value
+      (not yet parameterized from outside the module/environment), so
+      adding a node today still means editing that default rather than
+      passing in a wholly external topology.
 - [ ] Migrate onto dedicated hardware once available
 - [x] `swarm-lab`'s `Vagrantfile` stays — deliberately kept so `swarm-lab`
       remains a fully independent, self-contained project that can be spun
