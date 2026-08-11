@@ -12,26 +12,26 @@ this repo (see [CI/CD](#cicd) for how the two connect via a pinned tag).
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ G750JX (physical host, 24GB RAM / 8 cores)                      │
-│                                                                 │
-│  br0 (NetworkManager bridge, bound to enp4s0 → LAN)             │
-│   │                                                             │
-│   └── proxmox-lab (KVM/libvirt VM, nested virtualization)       │
-│         18GB RAM / 6 vCPU, host-passthrough CPU                 │
-│         Proxmox VE 8.4, reachable at 192.168.100.20:8006        │
-│          │                                                      │
-│          └── vmbr0 (Proxmox-internal bridge, port: enp1s0)      │
-│               │                                                 │
-│               ├── VM 9000: ubuntu-cloud-template (golden image) │
-│               ├── CT 200: minio (LXC, systemd daemon)           │
-│               │     — Terraform state backend, NOT managed      │
-│               │       by Terraform itself                       │
+┌─────────────────────────────────────────────────────────────────────┐
+│ G750JX (physical host, 24GB RAM / 8 cores)                          │
+│                                                                     │
+│  br0 (NetworkManager bridge, bound to enp4s0 → LAN)                 │
+│   │                                                                 │
+│   └── proxmox-lab (KVM/libvirt VM, nested virtualization)           │
+│         18GB RAM / 6 vCPU, host-passthrough CPU                     │
+│         Proxmox VE 8.4, reachable at 192.168.100.20:8006            │
+│          │                                                          │
+│          └── vmbr0 (Proxmox-internal bridge, port: enp1s0)          │
+│               │                                                     │
+│               ├── VM 9000: ubuntu-cloud-template (golden image)     │
+│               ├── CT 200: minio (LXC, systemd daemon)               │
+│               │     — Terraform state backend, NOT managed          │
+│               │       by Terraform itself                           │
 │               ├── VM: ci-runner (root module: environments/runner/) │
-│               │     — GitHub Actions self-hosted runner         │
-│               └── VM: prod-node / stage-node / dev-node         │
-│                     (root module: environments/nodes/)          │
-└─────────────────────────────────────────────────────────────────┘
+│               │     — GitHub Actions self-hosted runner             │
+│               └── VM: prod-node / stage-node / dev-node             │
+│                     (root module: environments/nodes/)              │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 Managed remotely from a laptop (Zenbook) over the LAN — Terraform, `qm`/`pveum`
@@ -48,6 +48,13 @@ hardware shows up — everything from `proxmox-init.sh` onward is portable.
 normally run on bare metal via Vagrant ([`swarm-lab`](../swarm-lab),
 `poly-ci`) get tested *inside* this Proxmox instance instead of directly on
 the host, so the 18GB doesn't compete with them for host resources.
+
+**Storage is comfortably overcommitted, not a coincidence.** The nested
+disk backing `local-lvm` is 60GB, and the sum of the nominal sizes of every
+thin volume on it (VMs + MinIO CT) already exceeds that — thin provisioning
+means this "works" until actual usage catches up. See the LVM thin pool
+entries in [Troubleshooting notes](#troubleshooting-notes-things-that-actually-broke)
+below for what happens when it does, and what's in place to catch it early.
 
 ### Two independent root modules, on purpose
 
@@ -162,7 +169,8 @@ environments/
 scripts/
 ├── install-proxmox-with-libvirt.sh   # host-side: creates the nested Proxmox VM,
 │                                     #   with a guard/auto-fix for the br0 bridge
-├── proxmox-init.sh                   # Proxmox-side: terraform user/role/token, golden image
+├── proxmox-init.sh                   # Proxmox-side: terraform user/role/token, golden image,
+│                                     #   thin-pool autoextend threshold
 └── minio-lxc-init.sh                 # Proxmox-side: MinIO LXC (state backend), NOT terraform-managed
 ```
 
@@ -213,6 +221,10 @@ scripts/
   what the golden image already had), so `qm terminal <vmid>` now shows a
   real console instead of a blank screen — closes a long-standing diagnosis
   gap; see Troubleshooting notes.
+- `proxmox-init.sh` now also pins `activation { thin_pool_autoextend_threshold = 80 }`
+  in `/etc/lvm/lvm.conf`, so a future host rebuild doesn't silently drop this
+  guard — see the thin-pool exhaustion entries in Troubleshooting notes for
+  why it's there.
 
 ## Quickstart
 
@@ -258,8 +270,12 @@ ssh root@<proxmox-ip> 'bash -s' < scripts/proxmox-init.sh
 Creates the `terraform@pve` user, a scoped `TerraformProv` role, an API
 token, and the `ubuntu-cloud-template` (VM 9000) golden image. Also pins
 `/etc/resolv.conf` (Proxmox's own DNS otherwise doesn't survive a fresh
-install) and enables the `snippets` content type on the `local` datastore
-(needed for cloud-init user-data uploads). Idempotent.
+install), enables the `snippets` content type on the `local` datastore
+(needed for cloud-init user-data uploads), and sets
+`activation { thin_pool_autoextend_threshold = 80 }` in `/etc/lvm/lvm.conf`
+so a filling thin pool surfaces a warning well before it hits 100% and
+starts throwing I/O errors at every VM on the host (see Troubleshooting
+notes). Idempotent.
 
 The API token secret is printed to `/root/terraform-token.json` on first
 run — copy it into `terraform.tfvars`, then consider deleting that file from
@@ -416,7 +432,9 @@ the runner is applied by hand, never from its own CI job.
    resource and uploading it as a build artifact.
 2. **deploy** — checks out this repo (for `inventory.ini`) alongside a
    **pinned tag** of [`swarm-lab`](../swarm-lab) (currently `v0.3.3`, set via
-   `ref:` in the `Checkout swarm-lab` step), then runs
+   `ref:` in the `Checkout swarm-lab` step), waits for every node to finish
+   booting (SSH reachable + `cloud-init status --wait`, see
+   Troubleshooting notes for why this step exists), then runs
    `swarm-lab/ansible/site.yml` against the freshly provisioned nodes.
 
 **Why a pinned tag instead of `main`:** the deploy job needs a stable,
@@ -502,6 +520,38 @@ against real `HTTP 403` responses, not from a single source of truth:
   (`lvextend -l +100%FREE pve/data`). Worth periodically checking `lvs pve`
   against `qm list` for orphaned disks whenever a `destroy`/`apply` gets
   interrupted.
+
+- **Thin pool exhaustion recurred from natural growth, not an orphan this
+  time — and took down every VM plus the state backend simultaneously.**
+  With no orphaned disk left to blame, ordinary data growth across the
+  four thin volumes eventually refilled `pve/data` to 100% again. Unlike
+  the earlier incident, this hit the pool while everything was live and
+  running unattended overnight: `dmesg` showed `EXT4-fs` write errors on
+  every VM's disk simultaneously (`I/O error 3 writing to inode ...`), and
+  `qm`/`pct` reboots issued in response all failed with
+  `VM quit/powerdown failed - got timeout` because the guest agent itself
+  couldn't respond over a filesystem that could no longer write. CT 200
+  (MinIO) took the worst of it — its journal aborted
+  (`EXT4-fs error: Journal has aborted`) badly enough that
+  `pct exec 200 -- systemctl status minio` failed outright with
+  `lxc-attach: Input/output error`, since even `exec`-ing a command
+  requires a working root filesystem. Recovered by: stopping every
+  VM/CT (`qm stop <id>`, `pct stop 200`) to halt further writes,
+  `lvextend -l +100%FREE pve/data` (there was still ~7GB of free space in
+  the volume group itself — `vgs pve`'s `VFree` — that the pool had never
+  been extended into), `pct fsck 200` to repair the aborted journal (ran
+  clean on the second pass), then starting everything back up. **Two
+  follow-ups landed as a direct result:** `scripts/proxmox-init.sh` now
+  sets `activation { thin_pool_autoextend_threshold = 80 }` in
+  `/etc/lvm/lvm.conf` so this surfaces as an early LVM warning instead of
+  a silent slide into I/O errors at 100%; and the underlying overcommit is
+  still real — `lvextend`'s own output after this incident
+  (`Sum of all thin volume sizes (<61.52 GiB) exceeds the size of thin
+  pool pve/data and the size of whole volume group (<59.50 GiB)`) means
+  the *ceiling* the pool can be extended to is now the actual bottleneck,
+  not a one-off cleanup. Recurs whenever real usage catches up again;
+  `pvesm status` / `lvs pve` should be the first thing checked on any
+  simultaneous multi-VM `io-error`, ahead of anything guest-side.
 
 - **Concurrent full-clones on the nested setup are unreliable.**
   `terraform apply` with default parallelism clones all node VMs at once;
@@ -622,6 +672,24 @@ against real `HTTP 403` responses, not from a single source of truth:
   checks. Running it may briefly drop the current SSH session (expected,
   since `enp4s0` is being reparented); just reconnect and re-run.
 
+- **`deploy` job hit a `dpkg` lock race and an intermittently unreachable
+  node, both traced to the same root cause: node VMs report "provisioned"
+  before cloud-init has actually finished.** `wait_for_ip_disabled = true`
+  on the node module means `terraform apply` returns as soon as the VM is
+  cloned, without waiting for SSH or cloud-init completion. On one run,
+  `dev-node` (cloned last) wasn't SSH-reachable yet when Ansible connected;
+  on another, the `docker` role's `apt-get install docker.io` collided
+  with cloud-init's own `apt-get install qemu-guest-agent` running
+  concurrently on the same node, and the loser failed on
+  `dpkg`'s lock-frontend. Manually checking the "unreachable" node moments
+  later showed it fully up — the pipeline just hadn't waited the extra
+  seconds cloud-init needed. Fixed by adding a `Wait for nodes to finish
+  booting` step in `pipeline.yml`'s `deploy` job, between installing
+  Ansible collections and running the playbook: polls each host's SSH port
+  first, then blocks on `cloud-init status --wait` over SSH, so `apt` on
+  the node is guaranteed free before the `docker`/`github-runner` Ansible
+  roles touch it.
+
 - **`deploy` job's `github-runner` Ansible role failed silently on a
   registration-token 404, because the workflow never set `GITHUB_REPO`.**
   The role reads both `GITHUB_REPO` and `GITHUB_PAT` from the environment
@@ -676,7 +744,8 @@ against real `HTTP 403` responses, not from a single source of truth:
 - [x] Full `provision` → `deploy` pipeline green end-to-end: Terraform
       provisions nodes, Ansible (pinned `swarm-lab` tag) bootstraps Docker,
       Swarm, stack deploy, and self-hosted runner registration, all
-      unattended
+      unattended — including an explicit wait for node boot/cloud-init
+      completion before Ansible touches a node (see Troubleshooting notes)
 - [x] `docker`/`github-runner` Ansible roles are provisioning-flow
       agnostic (`ansible_user`-driven), no more hardcoded `vagrant`
 - [x] Node/runner VM provisioning extracted into a reusable module
@@ -696,6 +765,19 @@ against real `HTTP 403` responses, not from a single source of truth:
       Working around the regional block on HashiCorp's Terraform CLI
       distribution required re-hosting the binary on the self-hosted MinIO
       instance (`tools/` bucket) rather than fetching it directly.
+- [x] `scripts/register-github-runner.sh` installs/re-registers the
+      GitHub Actions runner agent itself on `ci-runner` — kept as a
+      separate, manually-run step (not cloud-init) because GitHub's
+      registration token is one-time-use and expires in ~1 hour, so it
+      can't be baked into a template that might apply at an unknown
+      later time.
+- [x] LVM thin pool exhaustion on the host is now caught early —
+      `proxmox-init.sh` sets `thin_pool_autoextend_threshold = 80` — but
+      the underlying overcommit (sum of thin volumes vs. actual VG size)
+      is structural, not fully resolved; recurs whenever real disk usage
+      catches up. Revisit node/runner `disk_size` sizing, or add another
+      physical disk to the thin pool, before this needs a third manual
+      recovery.
 - [ ] Migrate onto dedicated hardware once available
 - [x] `swarm-lab`'s `Vagrantfile` stays — deliberately kept so `swarm-lab`
       remains a fully independent, self-contained project that can be spun
