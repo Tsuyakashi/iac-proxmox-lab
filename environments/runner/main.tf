@@ -19,4 +19,45 @@ module "ci_runner" {
 
   vm_ssh_public_key = var.vm_ssh_public_key
   ci_ssh_public_key = var.ci_ssh_public_key
+
+  docker_group = true
+  extra_packages = [
+    "docker.io",
+    "curl",
+    "jq",
+    "ansible",
+    "unzip",
+    "gnupg",
+    "software-properties-common",
+    "lsb-release",
+  ]
+
+  write_files = [
+    {
+      path        = "/home/ubuntu/.terraformrc"
+      owner       = "ubuntu:ubuntu"
+      permissions = "0644"
+      content     = <<-EOT
+        provider_installation {
+          network_mirror {
+            url     = "https://terraform-mirror.yandexcloud.net/"
+            include = ["registry.terraform.io/*/*"]
+          }
+          direct {
+            exclude = ["registry.terraform.io/*/*"]
+          }
+        }
+      EOT
+    }
+  ]
+
+  extra_runcmd = [
+    "systemctl enable --now docker",
+    "wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg",
+    "echo \"deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main\" > /etc/apt/sources.list.d/hashicorp.list",
+    "apt-get update",
+    "apt-get install -y terraform",
+    "curl -o /usr/local/bin/mc https://dl.min.io/client/mc/release/linux-amd64/mc",
+    "chmod +x /usr/local/bin/mc",
+  ]
 }

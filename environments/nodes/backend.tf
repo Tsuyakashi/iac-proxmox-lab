@@ -3,7 +3,7 @@ terraform {
     bucket                      = "iac-proxmox-lab-tfstate"
     key                         = "nodes/terraform.tfstate"
     region                      = "auto"
-    endpoints                   = { s3 = "http://192.168.100.10:9000" }
+    endpoints                   = { s3 = "http://192.168.100.13:9000" }
     skip_credentials_validation = true
     skip_metadata_api_check     = true
     skip_requesting_account_id  = true
