@@ -19,4 +19,35 @@ module "ci_runner" {
 
   vm_ssh_public_key = var.vm_ssh_public_key
   ci_ssh_public_key = var.ci_ssh_public_key
+
+  docker_group   = true
+  extra_packages = []
+
+  write_files = [
+    {
+      path        = "/home/ubuntu/.terraformrc"
+      owner       = "ubuntu:ubuntu"
+      permissions = "0644"
+      content     = <<-EOT
+        provider_installation {
+          network_mirror {
+            url     = "https://terraform-mirror.yandexcloud.net/"
+            include = ["registry.terraform.io/*/*"]
+          }
+          direct {
+            exclude = ["registry.terraform.io/*/*"]
+          }
+        }
+      EOT
+    }
+  ]
+
+  extra_runcmd = [
+    "apt-get install -y docker.io curl jq ansible unzip gnupg software-properties-common lsb-release",
+    "systemctl enable --now docker",
+    "curl -o /usr/local/bin/terraform http://192.168.100.13:9000/tools/terraform_1.15.8_linux_amd64",
+    "chmod +x /usr/local/bin/terraform",
+    "curl -o /usr/local/bin/mc https://dl.min.io/aistor/mc/release/linux-amd64/mc",
+    "chmod +x /usr/local/bin/mc",
+  ]
 }
