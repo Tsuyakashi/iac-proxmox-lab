@@ -98,3 +98,32 @@ variable "ci_ssh_public_key" {
   description = "SSH-ключ для CI/CD-доступа (без passphrase, отдельный от пользовательского)."
   type        = string
 }
+
+variable "extra_packages" {
+  description = "Additional apt packages to install via cloud-init (on top of qemu-guest-agent)."
+  type        = list(string)
+  default     = []
+}
+
+variable "extra_runcmd" {
+  description = "Additional shell commands to run via cloud-init runcmd, after the base setup."
+  type        = list(string)
+  default     = []
+}
+
+variable "write_files" {
+  description = "Additional files to write via cloud-init write_files (e.g. ~/.terraformrc)."
+  type = list(object({
+    path        = string
+    owner       = optional(string, "root:root")
+    permissions = optional(string, "0644")
+    content     = string
+  }))
+  default = []
+}
+
+variable "docker_group" {
+  description = "Add the ubuntu user to the docker group (only meaningful if docker.io is in extra_packages)."
+  type        = bool
+  default     = false
+}

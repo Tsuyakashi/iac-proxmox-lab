@@ -7,9 +7,9 @@ if ! pveum user list | grep -q "terraform@pve"; then
 fi
 
 if ! pveum role list | grep -q "TerraformProv"; then
-    pveum role add TerraformProv -privs "VM.Allocate VM.Clone VM.Config.Disk VM.Config.CPU VM.Config.Memory VM.Config.Network VM.Config.Options VM.Config.CDROM VM.Config.Cloudinit VM.PowerMgmt VM.Audit VM.Console VM.Monitor Datastore.AllocateSpace Datastore.Allocate Datastore.AllocateTemplate Datastore.Audit SDN.Use"
+    pveum role add TerraformProv -privs "VM.Allocate VM.Clone VM.Config.Disk VM.Config.CPU VM.Config.Memory VM.Config.Network VM.Config.Options VM.Config.CDROM VM.Config.Cloudinit VM.Config.HWType VM.PowerMgmt VM.Audit VM.Console VM.Monitor Datastore.AllocateSpace Datastore.Allocate Datastore.AllocateTemplate Datastore.Audit SDN.Use"
 else
-    pveum role modify TerraformProv -privs "VM.Allocate VM.Clone VM.Config.Disk VM.Config.CPU VM.Config.Memory VM.Config.Network VM.Config.Options VM.Config.CDROM VM.Config.Cloudinit VM.PowerMgmt VM.Audit VM.Console VM.Monitor Datastore.AllocateSpace Datastore.Allocate Datastore.AllocateTemplate Datastore.Audit SDN.Use"
+    pveum role modify TerraformProv -privs "VM.Allocate VM.Clone VM.Config.Disk VM.Config.CPU VM.Config.Memory VM.Config.Network VM.Config.Options VM.Config.CDROM VM.Config.Cloudinit VM.Config.HWType VM.PowerMgmt VM.Audit VM.Console VM.Monitor Datastore.AllocateSpace Datastore.Allocate Datastore.AllocateTemplate Datastore.Audit SDN.Use"
 fi
 
 pveum aclmod / -user terraform@pve -role TerraformProv
@@ -17,6 +17,21 @@ pveum aclmod / -user terraform@pve -role TerraformProv
 if ! pveum user token list terraform@pve | grep -q "provider-token"; then
     pveum user token add terraform@pve provider-token --privsep 0 --output-format json > /root/terraform-token.json
     echo "Token secret saved to /root/terraform-token.json — copy it to terraform.tfvars, then consider deleting this file."
+fi
+
+cat > /etc/resolv.conf << 'EOF'
+nameserver 192.168.100.1
+nameserver 8.8.8.8
+EOF
+
+# local datastore needs snippets content type for cloud-init user-data uploads (CI runner module)
+mkdir -p /var/lib/vz/snippets
+if ! grep -A3 "^dir: local$" /etc/pve/storage.cfg | grep -q snippets; then
+    pvesm set local --content backup,iso,vztmpl,snippets
+fi
+
+if ! grep -q "thin_pool_autoextend_threshold" /etc/lvm/lvm.conf; then
+    sed -i '/^activation {/a\    thin_pool_autoextend_threshold = 80' /etc/lvm/lvm.conf
 fi
 
 if [ ! -f "noble-server-cloudimg-amd64.img" ]; then
