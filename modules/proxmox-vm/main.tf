@@ -74,6 +74,14 @@ resource "proxmox_virtual_environment_vm" "this" {
     mac_address = var.mac_address
   }
 
+  serial_device {
+    device = "socket"
+  }
+
+  vga {
+    type = "serial0"
+  }
+
   initialization {
     ip_config {
       ipv4 {
