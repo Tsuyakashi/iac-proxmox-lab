@@ -50,3 +50,23 @@ if ! virsh list --all | grep -q "proxmox-lab"; then
         --os-variant debian12 \
         --virt-type kvm
 fi
+
+# vnet0 (the domain's own bridge port) doesn't always get attached to br0
+# automatically after a hard power loss / VM restart — STP-managed bridge,
+# libvirt's hook can race with br0 not being fully ready yet. Check and fix,
+# same pattern as the enp4s0 guard above.
+if virsh list --all | grep -q "proxmox-lab"; then
+    VNET=$(virsh domiflist proxmox-lab | awk '/br0/{print $1}')
+    if [ -n "$VNET" ] && ! brctl show br0 | grep -q "$VNET"; then
+        echo "$VNET not attached to br0, reattaching..."
+        brctl addif br0 "$VNET"
+        # newly added port needs to clear STP listening/learning before
+        # forwarding traffic — 15-30s with default timers, don't assume
+        # it's live immediately after addif
+        echo "waiting for $VNET to reach STP forwarding state..."
+        for i in $(seq 1 30); do
+            brctl showstp br0 | grep -A1 "^$VNET" | grep -q forwarding && break
+            sleep 1
+        done
+    fi
+fi

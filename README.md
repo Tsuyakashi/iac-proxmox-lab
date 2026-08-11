@@ -731,6 +731,25 @@ against real `HTTP 403` responses, not from a single source of truth:
   and `templates/inventory.tpl`), so neither role assumes a specific
   provisioning flow anymore.
 
+- **`vnet0` (the VM's own libvirt bridge port) doesn't reattach to `br0`
+  automatically after a hard power loss.** Different failure from the
+  `br0`/`enp4s0` case above — the physical NIC stayed correctly attached
+  throughout, but `virsh domiflist` still reported `vnet0` as belonging to
+  `br0` while `brctl show br0` didn't list it as an actual port. Symptom:
+  `ip neigh show <proxmox-ip>` stuck on `FAILED`, `arp -n` showed
+  `(incomplete)`, and `arping` got zero responses — all pointing at an L2
+  problem between host and VM, even though both `br0` and `vmbr0` (inside
+  the VM) showed `state UP` with correct addresses. Confirmed the VM's own
+  network was fine via `tcpdump -i vmbr0 -n arp` from inside the VM's
+  console (still saw ARP traffic from the guest VMs/CTs). Fixed with
+  `brctl addif br0 vnet0` — but a newly added bridge port starts in STP
+  `listening`/`learning` state and doesn't forward traffic until it reaches
+  `forwarding` (~15-30s with default timers, check via `brctl showstp br0`),
+  so don't assume the fix failed just because ping still fails immediately
+  after `addif`. `install-proxmox-with-libvirt.sh`'s existing guard only
+  checked the physical-NIC side of the bridge; extended it to also check
+  and reattach `vnet0`.
+
 ## Status
 
 - [x] Nested Proxmox VE running, reachable on the LAN
