@@ -26,7 +26,7 @@ this repo (see [CI/CD](#cicd) for how the two connect via a pinned tag).
 │               ├── VM 9000: ubuntu-cloud-template (golden image)     │
 │               ├── CT 200: minio (LXC, systemd daemon)               │
 │               │     — Terraform state backend, NOT managed          │
-│               │       by Terraform itself                           │
+│               │       by Terraform itself, static IP                │
 │               ├── VM: ci-runner (root module: environments/runner/) │
 │               │     — GitHub Actions self-hosted runner             │
 │               └── VM: prod-node / stage-node / dev-node             │
@@ -73,9 +73,13 @@ Consequences of the split:
 - `terraform apply` in `environments/nodes/` never touches the runner, and
   vice versa — no shared blast radius.
 - The runner is applied **manually, from a laptop**, never from CI on
-  itself. `environments/runner/` uses a local backend (state file lives
-  with the runner's own lifecycle, not S3) since it's touched rarely and by
-  hand.
+  itself. Both `environments/nodes/` and `environments/runner/` now use an
+  S3 (MinIO) backend — the runner's state was migrated off `local` onto the
+  same bucket (separate `key`), since the actual risk with a local backend
+  wasn't Proxmox dying (in that case state is moot either way — the VMs
+  are gone), but losing the laptop the runner is applied from while the
+  runner VM itself keeps running. See the S3-migration troubleshooting
+  entries below for the mechanics of that move.
 - `pipeline.yml`'s `paths: ['environments/nodes/**', 'modules/**']` filter
   means pushes under `environments/runner/**` don't trigger the CI job on
   the nodes — this was true before the split too, but now it's structurally
@@ -84,8 +88,9 @@ Consequences of the split:
 
 ### State backend lives off both
 
-Terraform state for the node module (`backend.tf`, S3-compatible) points at
-MinIO running in **CT 200**, an LXC container on the Proxmox host — not a
+Terraform state for both root modules (`environments/nodes/backend.tf` and
+`environments/runner/backend.tf`, both S3-compatible) points at MinIO
+running in **CT 200**, an LXC container on the Proxmox host — not a
 Terraform-managed VM, not colocated with the runner. This is deliberate:
 the backend must survive independently of anything a `terraform apply`
 might do to the infrastructure it describes. MinIO used to run inside the
@@ -99,6 +104,11 @@ exposure to arbitrary/untrusted input, so the lighter, faster, cheaper LXC
 container is fine. The runner executes arbitrary workflow code and stays in
 a full VM for the stronger KVM-level isolation — see the reasoning in the
 troubleshooting notes.
+
+**CT 200's network address is statically pinned, not DHCP** (`ip=<addr>/24,
+gw=<gateway>` in `minio-lxc-init.sh`, the same approach nodes already use
+via cloud-init) — see the DHCP-drift entry in Troubleshooting notes for why
+this changed.
 
 **The same MinIO bucket also doubles as an internal binary mirror.** A
 `tools/` prefix in the `iac-proxmox-lab-tfstate` bucket (public-download,
@@ -118,8 +128,9 @@ below.
 - **cloud-init** — VM bootstrapping (user creation, SSH keys, package install)
 - **Ubuntu 24.04 (Noble) cloud image** — golden template, cloned per VM
 - **MinIO** (LXC, systemd daemon, no Docker) — S3-compatible Terraform state
-  backend, independent of both the runner and the node VMs; also serves as
-  an internal binary mirror for tools blocked by regional restrictions
+  backend for both root modules, independent of the runner and the node
+  VMs; also serves as an internal binary mirror for tools blocked by
+  regional restrictions
 - **Ansible** — post-provision configuration, delegated to
   [`swarm-lab`](../swarm-lab)'s playbook via a pinned git tag (see
   [CI/CD](#cicd) below)
@@ -162,16 +173,20 @@ environments/
     ├── variables.tf
     ├── outputs.tf                    #   ci_runner_ip
     ├── providers.tf
-    ├── backend.tf                    #   local backend — applied manually, not from CI
+    ├── backend.tf                    #   S3 (MinIO/CT 200) — migrated off local, see
+    │                                 #   Troubleshooting notes for why and how
     └── terraform.tfvars.example
 
 .github/workflows/pipeline.yml        # provision (terraform, environments/nodes) + deploy (ansible)
 scripts/
 ├── install-proxmox-with-libvirt.sh   # host-side: creates the nested Proxmox VM,
-│                                     #   with a guard/auto-fix for the br0 bridge
+│                                     #   with guards/auto-fixes for both the br0/enp4s0
+│                                     #   physical-NIC attachment and the VM's own vnet0
+│                                     #   bridge port
 ├── proxmox-init.sh                   # Proxmox-side: terraform user/role/token, golden image,
 │                                     #   thin-pool autoextend threshold
-└── minio-lxc-init.sh                 # Proxmox-side: MinIO LXC (state backend), NOT terraform-managed
+└── minio-lxc-init.sh                 # Proxmox-side: MinIO LXC (state backend), NOT terraform-managed,
+                                       #   statically-addressed
 ```
 
 **What changed vs. the original flat layout**, and why:
@@ -200,7 +215,9 @@ scripts/
   bucket later — **this requires `terraform init -migrate-state` (or a
   manual state copy in MinIO) when adopting this layout on an existing
   state file**, it's not a no-op rename. Performed by hand on this repo's
-  own state during PR #23.
+  own state during PR #23. The same `nodes/` vs `runner/` key-namespacing
+  later made it straightforward to migrate `environments/runner/`'s state
+  into the same bucket too — see Troubleshooting notes.
 - Moving the VM/cloud-init resources into `modules/proxmox-vm` also meant
   they picked up new state addresses (`module.node["..."]....` instead of
   the old flat `proxmox_virtual_environment_vm.node["..."]`). Adopting this
@@ -225,6 +242,8 @@ scripts/
   in `/etc/lvm/lvm.conf`, so a future host rebuild doesn't silently drop this
   guard — see the thin-pool exhaustion entries in Troubleshooting notes for
   why it's there.
+- `minio-lxc-init.sh` now assigns CT 200 a static IP instead of DHCP — see
+  the DHCP-drift entry in Troubleshooting notes for why.
 
 ## Quickstart
 
@@ -237,8 +256,10 @@ scripts/
 Checks KVM acceleration and nested virtualization are available, ensures the
 `br0` bridge is up and has the physical NIC attached (auto-fixes it if a
 previous VM teardown reverted `br0-port` to a standalone profile — see
-Troubleshooting notes), downloads the Proxmox VE ISO, and creates the VM via
-`virt-install`. Idempotent — safe to re-run.
+Troubleshooting notes), ensures the VM's own `vnet0` bridge port is actually
+attached to `br0` (auto-fixes and waits out STP forwarding delay if not —
+see Troubleshooting notes), downloads the Proxmox VE ISO, and creates the VM
+via `virt-install`. Idempotent — safe to re-run.
 
 Complete the Proxmox installer manually via `virt-viewer` or the VNC console
 (disk selection, root password, network — see the "Bridging to the LAN"
@@ -300,14 +321,15 @@ MINIO_ROOT_PASSWORD='<pick-a-password>' ssh root@<proxmox-ip> 'bash -s' < script
 ```
 
 Creates CT 200, an unprivileged LXC container, and runs MinIO inside it as a
-systemd service. Not a Terraform resource by design — see
+systemd service, on a statically-assigned IP (not DHCP — see Troubleshooting
+notes for why). Not a Terraform resource by design — see
 [Architecture](#state-backend-lives-off-both) above. Prints the S3 endpoint
 and console URL on success.
 
 Then, via the printed console URL, create a bucket named
-`iac-proxmox-lab-tfstate` and update `endpoints.s3` in
-`environments/nodes/backend.tf` to match the printed IP if it differs from
-what's currently committed.
+`iac-proxmox-lab-tfstate` and confirm `endpoints.s3` in both
+`environments/nodes/backend.tf` and `environments/runner/backend.tf` match
+the static IP set in `minio-lxc-init.sh`.
 
 **Optional, one-time:** if the runner will need `terraform`/`mc` binaries
 (it does — see [Runner host prerequisites](#runner-host-prerequisites-automated-via-cloud-init)
@@ -340,13 +362,18 @@ setup are unreliable.
 ```bash
 cd environments/runner/
 cp terraform.tfvars.example terraform.tfvars   # same values as the nodes tfvars
+export AWS_ACCESS_KEY_ID=<minio-user>
+export AWS_SECRET_ACCESS_KEY=<minio-password>
 terraform init
 terraform apply
 ```
 
 Always run this by hand, never from the self-hosted runner's own CI job —
 that's the whole point of the split. See
-[Architecture](#two-independent-root-modules-on-purpose).
+[Architecture](#two-independent-root-modules-on-purpose). State lives in the
+same MinIO bucket as the nodes' state, under a separate `runner/` key — see
+Troubleshooting notes for why a local backend here turned out to still be a
+single point of failure (laptop loss, not just Proxmox loss).
 
 ### Runner host prerequisites (automated via cloud-init)
 
@@ -396,6 +423,9 @@ What gets installed and why:
   one-time step (download over VPN, `mc cp` into `tools/` — see step 4
   above); bumping the Terraform version means repeating that upload and
   updating the filename in `environments/runner/main.tf`'s `extra_runcmd`.
+  The MinIO IP baked into that URL is now the pinned static address, so it
+  no longer needs re-syncing after every CT restart — see the DHCP-drift
+  entry in Troubleshooting notes for the incident that made this necessary.
 
 - **`docker.io`, `curl`, `jq`, `ansible`, `unzip`, `gnupg`,
   `software-properties-common`, `lsb-release`** — `docker.io` and `ansible`
@@ -508,6 +538,37 @@ against real `HTTP 403` responses, not from a single source of truth:
   Terraform gives up trying to reach the dead old backend and falls back to
   treating it as a fresh `-reconfigure`. Expect to run `terraform init`
   more than once when changing backend endpoints under failure conditions.
+
+- **The runner's local backend was still a single point of failure — just a
+  different one than Proxmox dying.** `environments/runner/` originally
+  used `backend "local"` on the reasoning that it's applied rarely, by
+  hand, from a laptop. That's true, but the actual risk isn't "Proxmox
+  disappears" (in that case state is moot regardless of backend — the VMs
+  are gone too) — it's losing the laptop (or just its disk) while the
+  runner VM keeps running fine. The next `terraform apply` from a fresh
+  machine wouldn't see the existing runner in state and would attempt to
+  create a second one on top of it (MAC/name collision at best). Migrated
+  `environments/runner/backend.tf` to the same S3 (MinIO) bucket the nodes
+  already use, under a separate `runner/terraform.tfstate` key (mirroring
+  the `nodes/` key-namespacing from PR #23) — `terraform init
+  -migrate-state`, confirm "copy existing state to new backend" — so the
+  runner's state survives independently of any single laptop, matching why
+  MinIO itself was pulled out of the runner VM in the first place.
+  (A local backend does remain the *only* correct choice if MinIO itself
+  ever becomes a Terraform-managed resource in this same environment — a
+  bootstrap/chicken-and-egg problem, since state can't live in a bucket
+  the same `apply` is creating. Not the current setup; noted in case that
+  changes.)
+
+- **`terraform init -migrate-state` for the runner failed with `no route to
+  host` reaching MinIO — turned out to be an unrelated host-level network
+  incident, not a backend/credentials problem.** A hard power loss (dead
+  laptop battery, no UPS) took the whole nested Proxmox VM down; `dial tcp
+  ...: connect: no route to host` on the MinIO bucket was a downstream
+  symptom of the VM being unreachable, not anything wrong with the S3
+  backend config itself. See the next two entries for the actual root
+  cause and fix; `-migrate-state` succeeded cleanly once the underlying
+  network path was restored.
 
 - **LVM thin pool exhaustion (`lvcreate` / `Cannot create new thin volume`)
   during a clone.** Sum of virtual disk sizes across nodes, runner, and the
@@ -750,6 +811,27 @@ against real `HTTP 403` responses, not from a single source of truth:
   checked the physical-NIC side of the bridge; extended it to also check
   and reattach `vnet0`.
 
+- **MinIO CT's DHCP address isn't stable across restarts.** Unlike nodes,
+  which pin their address via cloud-init static config (a specific
+  `mac_address` + `ip_config`), `minio-lxc-init.sh` originally created CT
+  200 with `ip=dhcp`. The address drifted at least twice
+  (`192.168.100.13` → `192.168.100.10`), surfacing indirectly and
+  unhelpfully each time: `backend.tf` in both `environments/nodes` and
+  `environments/runner` silently pointed at a dead IP (`no route to host`
+  on `terraform init`), and the hardcoded MinIO URL in
+  `environments/runner/main.tf`'s `extra_runcmd` (for pulling the
+  `terraform`/`mc` binaries) went stale right along with it — three
+  separate places that had to be manually re-synced by hand after
+  noticing, with no single point that would have caught the drift
+  earlier. Root cause was almost certainly one of the hard-power-loss
+  incidents on the host (see the `vnet0` and thin-pool entries above)
+  restarting CT 200 and having the DHCP lease land differently. Fixed by
+  pinning a static IP for CT 200 in `minio-lxc-init.sh`
+  (`ip=<addr>/24,gw=<gateway>` on `net0`, same pattern nodes already use),
+  with an idempotent guard so re-running the script against an
+  already-existing CT on a stale DHCP config corrects it (`pct set` +
+  reboot) instead of silently doing nothing.
+
 ## Status
 
 - [x] Nested Proxmox VE running, reachable on the LAN
@@ -759,7 +841,13 @@ against real `HTTP 403` responses, not from a single source of truth:
       assignment all working
 - [x] Runner split into an independent root module with its own backend
 - [x] State backend (MinIO/CT 200) moved off both the runner and the node
-      VMs it describes
+      VMs it describes, and pinned to a static IP so it doesn't drift on
+      restart
+- [x] Runner state migrated from a local backend onto the same MinIO
+      bucket as the nodes (separate `runner/` key) — protects against
+      laptop/disk loss while the runner VM itself keeps running, distinct
+      from the Proxmox-loss case a local backend never protected against
+      anyway
 - [x] Full `provision` → `deploy` pipeline green end-to-end: Terraform
       provisions nodes, Ansible (pinned `swarm-lab` tag) bootstraps Docker,
       Swarm, stack deploy, and self-hosted runner registration, all

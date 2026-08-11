@@ -16,6 +16,14 @@ CT_MEMORY=512
 CT_CORES=1
 CT_DISK_GB=8
 CT_BRIDGE="vmbr0"
+# Pinned, not DHCP — CT 200's DHCP address drifted at least twice
+# (192.168.100.13 -> 192.168.100.10), silently breaking backend.tf in both
+# environments/nodes and environments/runner, plus the hardcoded MinIO URL
+# in environments/runner/main.tf's extra_runcmd, until each was manually
+# re-synced. Nodes already avoid this via static cloud-init IPs; CT 200
+# gets the same treatment here. See README Troubleshooting notes.
+CT_IP="192.168.100.10/24"
+CT_GATEWAY="192.168.100.1"
 STORAGE="local-lvm"
 TEMPLATE_STORAGE="local"
 TEMPLATE="ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
@@ -37,10 +45,21 @@ if ! pct status "${CTID}" &>/dev/null; then
         --memory "${CT_MEMORY}" \
         --cores "${CT_CORES}" \
         --rootfs "${STORAGE}:${CT_DISK_GB}" \
-        --net0 "name=eth0,bridge=${CT_BRIDGE},ip=dhcp" \
+        --net0 "name=eth0,bridge=${CT_BRIDGE},ip=${CT_IP},gw=${CT_GATEWAY}" \
         --unprivileged 1 \
         --features "nesting=1" \
         --onboot 1
+else
+    # idempotent guard: CT already exists (e.g. from an earlier dhcp-based
+    # run of this script) — make sure net0 is actually pinned to CT_IP and
+    # not left over on a stale dhcp config from before this change landed.
+    CURRENT_NET0=$(pct config "${CTID}" | awk '/^net0:/{print}')
+    if ! echo "${CURRENT_NET0}" | grep -q "ip=${CT_IP}"; then
+        echo "net0 not pinned to ${CT_IP}, updating (CT will restart to apply)..."
+        pct set "${CTID}" --net0 "name=eth0,bridge=${CT_BRIDGE},ip=${CT_IP},gw=${CT_GATEWAY}"
+        pct reboot "${CTID}" 2>/dev/null || true
+        sleep 5
+    fi
 fi
 
 if [ "$(pct status "${CTID}" | awk '{print $2}')" != "running" ]; then
@@ -97,11 +116,9 @@ systemctl daemon-reload
 systemctl enable --now minio
 "
 
-CT_IP=$(pct exec "${CTID}" -- hostname -I | awk '{print $1}')
-
 echo "MinIO LXC ready: CT ${CTID} (${CT_HOSTNAME})"
-echo "  S3 endpoint:      http://${CT_IP}:9000"
-echo "  Console:           http://${CT_IP}:9001"
+echo "  S3 endpoint:      http://${CT_IP%/*}:9000"
+echo "  Console:           http://${CT_IP%/*}:9001"
 echo "  Root user:          ${MINIO_ROOT_USER}"
-echo "Update backend.tf 'endpoints.s3' to point at http://${CT_IP}:9000"
-echo "then create the bucket via the console or 'mc' before running terraform init."
+echo "backend.tf 'endpoints.s3' should already point at http://${CT_IP%/*}:9000 (pinned, not dhcp)."
+echo "Create the bucket via the console or 'mc' before running terraform init, if not already done."
