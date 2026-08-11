@@ -19,6 +19,17 @@ if ! pveum user token list terraform@pve | grep -q "provider-token"; then
     echo "Token secret saved to /root/terraform-token.json — copy it to terraform.tfvars, then consider deleting this file."
 fi
 
+cat > /etc/resolv.conf << 'EOF'
+nameserver 192.168.100.1
+nameserver 8.8.8.8
+EOF
+
+# local datastore needs snippets content type for cloud-init user-data uploads (CI runner module)
+mkdir -p /var/lib/vz/snippets
+if ! grep -A3 "^dir: local$" /etc/pve/storage.cfg | grep -q snippets; then
+    pvesm set local --content backup,iso,vztmpl,snippets
+fi
+
 if [ ! -f "noble-server-cloudimg-amd64.img" ]; then
     wget https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
 fi
