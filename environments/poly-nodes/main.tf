@@ -14,6 +14,9 @@ module "node" {
   memory         = each.value.memory
   mac_address    = each.value.mac
 
+  datastore_id_disk = "hdd-storage"
+  disk_size         = 20
+
   ip_config = {
     mode    = "static"
     address = each.value.ip
