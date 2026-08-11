@@ -93,6 +93,15 @@ container is fine. The runner executes arbitrary workflow code and stays in
 a full VM for the stronger KVM-level isolation — see the reasoning in the
 troubleshooting notes.
 
+**The same MinIO bucket also doubles as an internal binary mirror.** A
+`tools/` prefix in the `iac-proxmox-lab-tfstate` bucket (public-download,
+`mc anonymous set download local/tools`) holds binaries that can't be
+fetched directly from the runner due to regional blocks — currently the
+Terraform CLI itself (`terraform_<version>_linux_amd64`, downloaded once
+over a VPN and pushed via `mc cp`) and MinIO client. See the HashiCorp
+distribution note in [Troubleshooting notes](#troubleshooting-notes-things-that-actually-broke)
+below.
+
 ## Stack
 
 - **Proxmox VE 8.4** — hypervisor
@@ -102,7 +111,8 @@ troubleshooting notes.
 - **cloud-init** — VM bootstrapping (user creation, SSH keys, package install)
 - **Ubuntu 24.04 (Noble) cloud image** — golden template, cloned per VM
 - **MinIO** (LXC, systemd daemon, no Docker) — S3-compatible Terraform state
-  backend, independent of both the runner and the node VMs
+  backend, independent of both the runner and the node VMs; also serves as
+  an internal binary mirror for tools blocked by regional restrictions
 - **Ansible** — post-provision configuration, delegated to
   [`swarm-lab`](../swarm-lab)'s playbook via a pinned git tag (see
   [CI/CD](#cicd) below)
@@ -120,11 +130,14 @@ separation described below (not just a folder convention).
 modules/
 └── proxmox-vm/                       # reusable module — no backend, no provider block
     ├── main.tf                       #   VM + cloud-init file resource
-    ├── variables.tf                  #   name, sizing, ip_config (static|dhcp), ssh keys...
+    ├── variables.tf                  #   name, sizing, ip_config (static|dhcp), ssh keys,
+    │                                 #   extra_packages/extra_runcmd/write_files/docker_group
     ├── versions.tf                   #   required_version + required_providers
     ├── outputs.tf                    #   vm_id, ipv4_addresses
     ├── README.md
-    └── templates/user-data.yml.tpl   #   cloud-init template (users, packages, guest agent)
+    └── templates/user-data.yml.tpl   #   cloud-init template (users, packages, guest agent,
+                                       #   optional write_files/extra runcmd for environment-
+                                       #   specific provisioning — see below)
 
 environments/
 ├── nodes/                            # ROOT MODULE — prod/stage/dev nodes
@@ -136,7 +149,9 @@ environments/
 │   ├── terraform.tfvars.example
 │   └── templates/inventory.tpl       #   ansible inventory template (used only here)
 └── runner/                           # ROOT MODULE — CI runner, own state/lifecycle
-    ├── main.tf                       #   single module "ci_runner" call, dhcp
+    ├── main.tf                       #   single module "ci_runner" call, dhcp,
+    │                                 #   extra_packages/extra_runcmd/write_files for
+    │                                 #   runner-specific prerequisites (see below)
     ├── variables.tf
     ├── outputs.tf                    #   ci_runner_ip
     ├── providers.tf
@@ -145,7 +160,8 @@ environments/
 
 .github/workflows/pipeline.yml        # provision (terraform, environments/nodes) + deploy (ansible)
 scripts/
-├── install-proxmox-with-libvirt.sh   # host-side: creates the nested Proxmox VM
+├── install-proxmox-with-libvirt.sh   # host-side: creates the nested Proxmox VM,
+│                                     #   with a guard/auto-fix for the br0 bridge
 ├── proxmox-init.sh                   # Proxmox-side: terraform user/role/token, golden image
 └── minio-lxc-init.sh                 # Proxmox-side: MinIO LXC (state backend), NOT terraform-managed
 ```
@@ -175,14 +191,28 @@ scripts/
   `nodes/terraform.tfstate` to make room for other environments in the same
   bucket later — **this requires `terraform init -migrate-state` (or a
   manual state copy in MinIO) when adopting this layout on an existing
-  state file**, it's not a no-op rename. Performed by hand on this repo's own state during PR #23.
+  state file**, it's not a no-op rename. Performed by hand on this repo's
+  own state during PR #23.
 - Moving the VM/cloud-init resources into `modules/proxmox-vm` also meant
   they picked up new state addresses (`module.node["..."]....` instead of
   the old flat `proxmox_virtual_environment_vm.node["..."]`). Adopting this
   layout on existing state needs `moved` blocks mapping the old addresses
   to the new ones — otherwise Terraform reads the rename as
   destroy-old/create-new and will happily recreate every live VM. Add them
-  temporarily, `apply` once, then they can be deleted. This is exactly what was done here — the blocks were added, applied once with no destroy/create in the plan, then removed.
+  temporarily, `apply` once, then they can be deleted. This is exactly what
+  was done here — the blocks were added, applied once with no destroy/create
+  in the plan, then removed.
+- `modules/proxmox-vm` gained four optional inputs — `extra_packages`,
+  `extra_runcmd`, `write_files`, `docker_group` — so environment-specific
+  provisioning (currently only the runner needs any of this) stays out of
+  the shared base template. `environments/nodes` never sets these, so node
+  VMs are unaffected; see
+  [Runner host prerequisites](#runner-host-prerequisites-automated-via-cloud-init)
+  below for how the runner uses them.
+- Both VM resources gained an explicit `serial_device`/`vga` block (matching
+  what the golden image already had), so `qm terminal <vmid>` now shows a
+  real console instead of a blank screen — closes a long-standing diagnosis
+  gap; see Troubleshooting notes.
 
 ## Quickstart
 
@@ -192,9 +222,11 @@ scripts/
 ./scripts/install-proxmox-with-libvirt.sh
 ```
 
-Checks KVM acceleration and nested virtualization are available, downloads
-the Proxmox VE ISO, and creates the VM via `virt-install`. Idempotent — safe
-to re-run.
+Checks KVM acceleration and nested virtualization are available, ensures the
+`br0` bridge is up and has the physical NIC attached (auto-fixes it if a
+previous VM teardown reverted `br0-port` to a standalone profile — see
+Troubleshooting notes), downloads the Proxmox VE ISO, and creates the VM via
+`virt-install`. Idempotent — safe to re-run.
 
 Complete the Proxmox installer manually via `virt-viewer` or the VNC console
 (disk selection, root password, network — see the "Bridging to the LAN"
@@ -224,7 +256,10 @@ ssh root@<proxmox-ip> 'bash -s' < scripts/proxmox-init.sh
 ```
 
 Creates the `terraform@pve` user, a scoped `TerraformProv` role, an API
-token, and the `ubuntu-cloud-template` (VM 9000) golden image. Idempotent.
+token, and the `ubuntu-cloud-template` (VM 9000) golden image. Also pins
+`/etc/resolv.conf` (Proxmox's own DNS otherwise doesn't survive a fresh
+install) and enables the `snippets` content type on the `local` datastore
+(needed for cloud-init user-data uploads). Idempotent.
 
 The API token secret is printed to `/root/terraform-token.json` on first
 run — copy it into `terraform.tfvars`, then consider deleting that file from
@@ -258,6 +293,17 @@ Then, via the printed console URL, create a bucket named
 `environments/nodes/backend.tf` to match the printed IP if it differs from
 what's currently committed.
 
+**Optional, one-time:** if the runner will need `terraform`/`mc` binaries
+(it does — see [Runner host prerequisites](#runner-host-prerequisites-automated-via-cloud-init)
+below), create a `tools/` prefix in the same bucket and make it
+anonymously downloadable:
+
+```bash
+mc alias set local http://<minio-ip>:9000 <minio-user> <minio-password>
+mc mb local/tools --ignore-existing
+mc anonymous set download local/tools
+```
+
 ### 5. Provision the nodes
 
 ```bash
@@ -286,23 +332,24 @@ Always run this by hand, never from the self-hosted runner's own CI job —
 that's the whole point of the split. See
 [Architecture](#two-independent-root-modules-on-purpose).
 
-### 7. Runner host prerequisites (manual, not yet automated)
+### Runner host prerequisites (automated via cloud-init)
 
-The golden image / cloud-init only sets up the SSH user and
-`qemu-guest-agent` — everything the CI job (`pipeline.yml`) actually needs
-to run has to be installed by hand on the runner VM after every
-`terraform apply` in `runner/`. Forgetting a step here is what actually
-burned a handful of pipeline re-runs, so: check this list before assuming
-the pipeline itself is broken.
+Everything the CI job (`pipeline.yml`) needs on top of the golden image's
+baseline (SSH user, `qemu-guest-agent`) is now provisioned automatically by
+`environments/runner/main.tf`, via the module's `extra_packages`,
+`extra_runcmd`, `write_files`, and `docker_group` inputs — no manual pass
+after `terraform apply` is needed anymore. A runner recreate comes up ready
+in one shot (roughly 3–4 minutes on this nested setup, most of it spent on
+`apt-get install` for `docker.io`/`ansible` and their dependency trees).
 
-Required on the runner VM:
+What gets installed and why:
 
-- **`terraform`** — plus a `~/.terraformrc` with a network mirror, since
-  direct access to `registry.terraform.io` from this network isn't
-  reliable enough for unattended CI runs:
+- **`~/.terraformrc` with a network mirror** — direct access to
+  `registry.terraform.io` from this network isn't reliable enough for
+  unattended CI runs, so provider installation goes through a mirror
+  instead:
 
   ```hcl
-  # ~/.terraformrc
   provider_installation {
     network_mirror {
       url     = "https://terraform-mirror.yandexcloud.net/"
@@ -314,30 +361,44 @@ Required on the runner VM:
   }
   ```
 
-- **`docker.io`** — the GitHub Actions runner binary itself doesn't need
-  it, but nothing in the job currently does either; kept installed as a
-  baseline for anything Docker-adjacent added later.
-- **`curl`**, **`jq`** — used by the GitHub Actions runner scripts and
-  handy for ad-hoc debugging inside jobs.
-- **`ansible`** (`ansible-playbook`, `ansible-galaxy`) — runs the `deploy`
-  job's playbook from `swarm-lab`.
-- **MinIO client** — for poking at the state bucket (list objects, sanity
-  checks) from the runner without going through the Proxmox host.
+  Written via `write_files`, owned by `root:root` at write time and
+  `chown`'d to `ubuntu:ubuntu` afterward in `runcmd` — see the write_files
+  ordering note in Troubleshooting notes for why it can't be owned by
+  `ubuntu` directly at write time.
+
+- **`terraform` CLI itself** — *not* installed via HashiCorp's apt repo or
+  GitHub releases; both are unreachable from this network (regional
+  distribution block — see Troubleshooting notes). Pulled instead from the
+  self-hosted MinIO `tools/` bucket:
+
+  ```bash
+  curl -o /usr/local/bin/terraform http://<minio-ip>:9000/tools/terraform_<version>_linux_amd64
+  chmod +x /usr/local/bin/terraform
+  ```
+
+  Getting a working binary into that bucket in the first place is a manual,
+  one-time step (download over VPN, `mc cp` into `tools/` — see step 4
+  above); bumping the Terraform version means repeating that upload and
+  updating the filename in `environments/runner/main.tf`'s `extra_runcmd`.
+
+- **`docker.io`, `curl`, `jq`, `ansible`, `unzip`, `gnupg`,
+  `software-properties-common`, `lsb-release`** — `docker.io` and `ansible`
+  for the `deploy` job's playbook run against `swarm-lab`; the rest are
+  general-purpose CI utilities.
+- **MinIO client (`mc`)** — for poking at the state bucket (list objects,
+  sanity checks) from the runner without going through the Proxmox host.
+  Pulled from `https://dl.min.io/aistor/mc/release/linux-amd64/mc` — note
+  the `aistor` path, not the older `client/mc/release/...` path, which now
+  serves an HTML redirect instead of the binary (see Troubleshooting
+  notes).
 
 Quick check after any runner recreate:
 
 ```bash
-which terraform ansible ansible-playbook ansible-galaxy docker
+ssh ubuntu@<runner-ip> 'which terraform ansible ansible-playbook ansible-galaxy docker mc'
 ```
 
-All five should resolve. If any are missing, the `pipeline.yml` job will
-fail well into the run (often after checkout/artifact steps already
-succeeded), which reads like a pipeline bug rather than a missing package —
-check this list first.
-
-This isn't scripted yet — see [Status](#status) — a natural next step is
-folding these into `runner/`'s cloud-init template or a small
-provisioning script run once per runner recreate.
+All six should resolve immediately — no manual install pass required.
 
 ## CI/CD
 
@@ -387,6 +448,7 @@ against real `HTTP 403` responses, not from a single source of truth:
 | `VM.Allocate`, `VM.Clone` | creating/cloning VMs |
 | `VM.Config.*` | disk, CPU, memory, network, options, CD-ROM config |
 | `VM.Config.Cloudinit` | **separate** from `VM.Config.Options` — cloud-init parameter changes on the clone |
+| `VM.Config.HWType` | **separate** again — changing `vga`/`serial_device` (added when the serial console fix landed; without it, `apply` fails with `HTTP 403: Permission check failed (/vms/<id>, VM.Config.HWType)`) |
 | `VM.PowerMgmt`, `VM.Audit`, `VM.Console`, `VM.Monitor` | start/stop, status, agent queries |
 | `Datastore.AllocateSpace`, `Datastore.AllocateTemplate`, `Datastore.Audit` | disk provisioning |
 | `Datastore.Allocate` | **separate** from `AllocateSpace` — managing the datastore resource itself, needed when the provider enables the `snippets` content type on first file upload |
@@ -450,20 +512,93 @@ against real `HTTP 403` responses, not from a single source of truth:
   `terraform apply -parallelism=1` for node provisioning — slower overall,
   but each clone gets the disk to itself.
 
-- **Node VMs have no usable serial console.** Unlike the golden image (VM
-  9000, provisioned with `--serial0 socket --vga serial0` in
-  `proxmox-init.sh`), the Terraform-managed node/runner VM resources don't
-  set an explicit `serial_device`/`vga` block, so `qm terminal <vmid>`
-  connects but shows nothing useful. When a guest fails to come up (dead
-  network, cloud-init stuck) and the QEMU agent is unreachable, diagnosis
-  has to go through the Proxmox web UI's VNC console instead of
-  `qm terminal` over SSH.
-
 - **`qemu-guest-agent` not running → 15-minute `apply` timeout.** The Ubuntu
   cloud image ships the agent package but doesn't enable it by default.
   Fixed by pushing a cloud-init snippet (now
   `modules/proxmox-vm/templates/user-data.yml.tpl`) that installs and
   enables it via `runcmd`, instead of relying on the base image.
+
+- **A heavy `packages:` list delays guest-agent startup enough to blow the
+  apply timeout anyway.** Once the runner started installing `docker.io`,
+  `ansible`, and friends via cloud-init's `packages:` list, the guest agent
+  (also only enabled via `runcmd`, which runs *after* the `packages:`
+  stage completes) didn't come up until the whole apt run finished —
+  10+ minutes on this nested setup, well past what looked like a hang.
+  Fixed by never putting heavy packages in `packages:` at all: only
+  `qemu-guest-agent` is installed there (fast, and gets the agent up within
+  the first ~30 seconds of boot), everything else (`docker.io`, `ansible`,
+  etc.) moves to `runcmd` as an explicit `apt-get install`, which runs
+  after the agent is already live and reporting to Terraform.
+
+- **`write_files` failed silently with `KeyError: getpwnam(): name not
+  found: 'ubuntu'`.** cloud-init's `write_files` module runs in the
+  `init-network` stage, which happens *before* the `users` module creates
+  any configured users — so `owner: ubuntu:ubuntu` on a `write_files` entry
+  fails to `chown` a user that doesn't exist yet, and the whole module
+  aborts (the file is never written, only a warning is logged — easy to
+  miss). Fixed by always writing `write_files` entries as `root:root`, then
+  `chown`ing them to the real target owner in `runcmd` (which *does* run
+  after user creation) — see the `write_files`/`chown` pairing in
+  `modules/proxmox-vm/templates/user-data.yml.tpl`.
+
+- **`packages: None is not of type 'array'` — cloud-init schema validation
+  failure when `extra_packages` is empty.** Rendering `packages:` with the
+  Terraform `for` loop but zero items produces a bare `packages:` key with
+  nothing under it, which YAML reads as `null`, not an empty list — cloud-init's
+  schema requires an array. This affects any VM with `extra_packages = []`
+  (i.e. every node, since only the runner sets packages). Fixed by wrapping
+  the whole `packages:` block in `%{ if length(extra_packages) > 0 ~}`, so
+  the key is omitted entirely rather than emitted empty.
+
+- **Multi-line `write_files` content breaks YAML if the block literal's
+  first line isn't indented.** Terraform's `indent(n, string)` indents every
+  line of a string *except the first* — so `content: |` followed directly by
+  `${indent(6, f.content)}` put the first line of the content at column 0
+  instead of the block's indent level, which either corrupts the whole
+  cloud-config parse (`could not find expected ':'`, with everything after
+  silently dropped as `empty cloud config`) or, in a milder case, just fails
+  schema validation for that one `write_files` entry. Fixed by adding the
+  indent manually before the interpolation: `      ${indent(6, f.content)}`
+  (6 literal spaces, since `indent()` only covers lines 2+).
+
+- **HashiCorp's Terraform CLI distribution (both
+  `apt.releases.hashicorp.com` and `releases.hashicorp.com`, which GitHub
+  Releases pages for Terraform link back to) is blocked for RU/BY IPs since
+  2022.** The `.terraformrc` network mirror already in use only covers
+  *provider* downloads via `terraform init`, not the CLI binary itself —
+  installing `terraform` via HashiCorp's apt repo or a direct GitHub
+  Releases URL both fail outright from this network. Worked around by
+  downloading the binary once over a VPN and re-hosting it on the
+  self-hosted MinIO instance (`tools/` prefix, anonymous-download bucket
+  policy); the runner's `extra_runcmd` pulls it from there instead. See
+  [Runner host prerequisites](#runner-host-prerequisites-automated-via-cloud-init).
+
+- **MinIO client's old download path
+  (`dl.min.io/client/mc/release/linux-amd64/mc`) now serves a small HTML
+  page instead of the binary**, following MinIO's AIStor rebrand — a plain
+  `curl -o mc <url>` without `-L` silently saves the HTML as if it were the
+  binary (141 bytes, `file` reports `HTML document`), and the resulting
+  "binary" fails with a bash parse error when executed. Fixed by switching
+  to the current path, `https://dl.min.io/aistor/mc/release/linux-amd64/mc`.
+
+- **Node VMs (and, before the serial console fix, the runner) had no usable
+  serial console.** The Terraform-managed VM resources didn't set an
+  explicit `serial_device`/`vga` block, unlike the golden image (VM 9000,
+  provisioned with `--serial0 socket --vga serial0` in `proxmox-init.sh`),
+  so `qm terminal <vmid>` connected but showed nothing useful — diagnosis
+  had to go through the Proxmox web UI's VNC console instead. Fixed by
+  adding the same `serial_device`/`vga` blocks to `modules/proxmox-vm`
+  (requires the `VM.Config.HWType` privilege — see the role table above).
+  Two remaining quirks worth knowing, not bugs:
+  - `qm terminal <vmid>` needs a real TTY on the client side — `ssh
+    proxmox-lab 'qm terminal <vmid>'` fails with `tcgetattr: Inappropriate
+    ioctl for device`; `ssh -t proxmox-lab 'qm terminal <vmid>'` works.
+  - Console login always rejects any password, by design — cloud-init only
+    sets `ssh_authorized_keys` for `ubuntu`, never a password, so the
+    account is locked for password auth. `Login incorrect` on the serial
+    console is expected; use SSH with the key instead. Reaching this login
+    prompt at all is actually a *good* sign — it means the VM booted fully
+    past init/network/multi-user.target.
 
 - **`user_account` block vs `user_data_file_id`.** These both generate
   cloud-init user-data; setting `user_data_file_id` takes over entirely, so
@@ -475,6 +610,17 @@ against real `HTTP 403` responses, not from a single source of truth:
   (single-digit ms up to ~3s). Confirmed as a Wi-Fi hop issue, not the
   bridge/nested-KVM setup — pinging from the physical host itself was
   consistently sub-millisecond.
+
+- **`br0` loses its physical-NIC attachment after a nested-VM
+  teardown/host reboot.** `enp4s0` reverts to a standalone `auto` NM
+  profile, leaving `br0` up but carrier-less (`NO-CARRIER`) and the nested
+  Proxmox VM completely unreachable (`no route to host`, even though the VM
+  itself boots fine — its `vnet` interface just has nowhere to send
+  traffic). Fixed with a guard in `install-proxmox-with-libvirt.sh` that
+  checks `br0`'s state and `br0-port`'s attachment before every run and
+  reattaches `enp4s0` if needed — see the script for the exact `nmcli`
+  checks. Running it may briefly drop the current SSH session (expected,
+  since `enp4s0` is being reparented); just reconnect and re-run.
 
 - **`deploy` job's `github-runner` Ansible role failed silently on a
   registration-token 404, because the workflow never set `GITHUB_REPO`.**
@@ -540,14 +686,18 @@ against real `HTTP 403` responses, not from a single source of truth:
       (not yet parameterized from outside the module/environment), so
       adding a node today still means editing that default rather than
       passing in a wholly external topology.
+- [x] Node/runner VMs have an explicit serial console (`serial_device`/`vga`
+      blocks, matching the golden image), so `qm terminal <vmid>` is a
+      reliable diagnosis path instead of a blank screen — closed alongside
+      the `VM.Config.HWType` privilege it requires.
+- [x] Runner host prerequisites folded into `runner/`'s cloud-init via the
+      module's `extra_packages`/`extra_runcmd`/`write_files`/`docker_group`
+      inputs — a runner recreate needs no manual dependency pass anymore.
+      Working around the regional block on HashiCorp's Terraform CLI
+      distribution required re-hosting the binary on the self-hosted MinIO
+      instance (`tools/` bucket) rather than fetching it directly.
 - [ ] Migrate onto dedicated hardware once available
 - [x] `swarm-lab`'s `Vagrantfile` stays — deliberately kept so `swarm-lab`
       remains a fully independent, self-contained project that can be spun
       up on its own hardware without this repo. This repo is a separate,
       Proxmox-specific provisioning path, not a replacement for it.
-- [ ] Give node/runner VMs an explicit serial console for consistency with
-      the golden image and easier diagnosis when the guest agent is
-      unreachable
-- [ ] Fold runner host prerequisites (§7) into `runner/`'s cloud-init or a
-      provisioning script, so a runner recreate doesn't need a manual
-      dependency pass
