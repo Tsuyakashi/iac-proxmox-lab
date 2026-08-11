@@ -81,5 +81,15 @@ jobs:
         run: |
           ansible-galaxy collection install -r swarm-lab/ansible/requirements.yml
 
+      - name: Wait for nodes to finish booting
+        run: |
+          for host in $(awk '/ansible_host=/{print $2}' inventory.ini | cut -d= -f2); do
+            echo "Waiting for SSH on $host..."
+            timeout 120 bash -c "until nc -z $host 22; do sleep 3; done"
+            echo "Waiting for cloud-init on $host..."
+            timeout 180 ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_ed25519 ubuntu@$host \
+              'cloud-init status --wait'
+          done
+
       - name: Run playbook
         run: ansible-playbook -i inventory.ini swarm-lab/ansible/site.yml -e "base_registry=${{ env.BASE_REGISTRY }}"
