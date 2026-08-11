@@ -30,6 +30,10 @@ if ! grep -A3 "^dir: local$" /etc/pve/storage.cfg | grep -q snippets; then
     pvesm set local --content backup,iso,vztmpl,snippets
 fi
 
+if ! grep -q "thin_pool_autoextend_threshold" /etc/lvm/lvm.conf; then
+    sed -i '/^activation {/a\    thin_pool_autoextend_threshold = 80' /etc/lvm/lvm.conf
+fi
+
 if [ ! -f "noble-server-cloudimg-amd64.img" ]; then
     wget https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
 fi
