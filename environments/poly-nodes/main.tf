@@ -14,8 +14,8 @@ module "node" {
   memory         = each.value.memory
   mac_address    = each.value.mac
 
-  datastore_id_disk = "hdd-storage"
-  disk_size         = 20
+  datastore_id_disk = each.value.datastore_id_disk
+  disk_size         = each.value.disk_size
 
   ip_config = {
     mode    = "static"
@@ -28,4 +28,3 @@ module "node" {
   vm_ssh_public_key = var.vm_ssh_public_key
   ci_ssh_public_key = var.ci_ssh_public_key
 }
-
