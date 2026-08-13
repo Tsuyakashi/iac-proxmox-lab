@@ -17,12 +17,12 @@ CT_CORES=1
 CT_DISK_GB=8
 CT_BRIDGE="vmbr0"
 # Pinned, not DHCP — CT 200's DHCP address drifted at least twice
-# (192.168.100.13 -> 192.168.100.10), silently breaking backend.tf in both
+# (192.168.100.13 -> 192.168.100.100), silently breaking backend.tf in both
 # environments/nodes and environments/runner, plus the hardcoded MinIO URL
 # in environments/runner/main.tf's extra_runcmd, until each was manually
 # re-synced. Nodes already avoid this via static cloud-init IPs; CT 200
 # gets the same treatment here. See README Troubleshooting notes.
-CT_IP="192.168.100.10/24"
+CT_IP="192.168.100.100/24"
 CT_GATEWAY="192.168.100.1"
 STORAGE="local-lvm"
 TEMPLATE_STORAGE="local"
