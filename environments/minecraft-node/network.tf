@@ -5,7 +5,7 @@
 # наружу через (в будущем) туннель, компрометация не должна давать доступ
 # к MinIO/runner/остальной LAN.
 
-resource "proxmox_virtual_environment_network_linux_bridge" "isolated" {
+resource "proxmox_network_linux_bridge" "isolated" {
   node_name = var.proxmox_node
   name      = "vmbr1"
   address   = "${var.isolated_gateway}/24"
@@ -33,15 +33,24 @@ resource "null_resource" "isolated_nat" {
       "grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf",
 
       "iptables -t nat -C POSTROUTING -s ${var.isolated_subnet} -o vmbr0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s ${var.isolated_subnet} -o vmbr0 -j MASQUERADE",
-      "iptables -C FORWARD -i vmbr1 -o vmbr0 -d 192.168.100.0/24 -j DROP 2>/dev/null || iptables -A FORWARD -i vmbr1 -o vmbr0 -d 192.168.100.0/24 -j DROP",
-      "iptables -C FORWARD -i vmbr1 -o vmbr0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i vmbr1 -o vmbr0 -j ACCEPT",
-      "iptables -C FORWARD -i vmbr0 -o vmbr1 -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i vmbr0 -o vmbr1 -m state --state ESTABLISHED,RELATED -j ACCEPT",
 
-      # persist через iptables-persistent, если стоит; если нет - правила
-      # переживут только до reboot хоста, не забудьте netfilter-persistent save
+      "iptables -D FORWARD -i vmbr1 -j FORWARD-VMBR1 2>/dev/null || true",
+      "iptables -F FORWARD-VMBR1 2>/dev/null || true",
+      "iptables -X FORWARD-VMBR1 2>/dev/null || true",
+
+      "iptables -N FORWARD-VMBR1",
+      "iptables -A FORWARD-VMBR1 -m state --state ESTABLISHED,RELATED -j ACCEPT",
+      "iptables -A FORWARD-VMBR1 -o vmbr0 -j ACCEPT",
+      "iptables -A FORWARD-VMBR1 -j DROP",
+      "iptables -A FORWARD -i vmbr1 -j FORWARD-VMBR1",
+
+      "iptables -D INPUT -i vmbr1 -j DROP 2>/dev/null || true",
+      "iptables -C INPUT -i vmbr1 -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i vmbr1 -m state --state ESTABLISHED,RELATED -j ACCEPT",
+      "iptables -A INPUT -i vmbr1 -j DROP",
+
       "which netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save || echo 'netfilter-persistent not installed - rules are NOT persisted across reboot, install it or add to proxmox-init.sh'"
     ]
   }
 
-  depends_on = [proxmox_virtual_environment_network_linux_bridge.isolated]
+  depends_on = [proxmox_network_linux_bridge.isolated]
 }

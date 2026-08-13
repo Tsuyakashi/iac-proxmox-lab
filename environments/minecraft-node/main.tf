@@ -31,6 +31,5 @@ module "node" {
   ci_ssh_public_key = var.ci_ssh_public_key
 
   # явно зависим от готовности моста/NAT, иначе VM может стартовать раньше
-  depends_on = [null_resource.isolated_nat]
-
+  depends_on = [proxmox_network_linux_bridge.isolated]
 }
