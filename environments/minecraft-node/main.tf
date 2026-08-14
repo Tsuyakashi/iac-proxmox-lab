@@ -79,6 +79,7 @@ module "node" {
     "chmod 600 /etc/playit/playit.toml",
     "systemctl daemon-reload",
     "systemctl enable --now minecraft.service",
-    "systemctl enable --now playit",
+    "systemctl enable playit",
+    "systemctl restart playit",
   ]
 }
