@@ -62,3 +62,14 @@ variable "isolated_gateway" {
   type        = string
   default     = "10.10.10.1"
 }
+
+variable "playit_secret_key" {
+  description = "playit.gg agent secret key (создать заранее на playit.gg/account/agents)"
+  type        = string
+  sensitive   = true
+}
+
+variable "server_jar_url" {
+  type    = string
+  default = "https://piston-data.mojang.com/v1/objects/823e2250d24b3ddac457a60c92a6a941943fcd6a/server.jar"
+}
