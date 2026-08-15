@@ -83,6 +83,7 @@ resource "proxmox_virtual_environment_vm" "this" {
   }
 
   initialization {
+    datastore_id = var.datastore_id_disk
     dns {
       servers = ["1.1.1.1", "8.8.8.8"]
     }
