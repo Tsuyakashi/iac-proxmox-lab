@@ -1,0 +1,5 @@
+proxmox_endpoint  = "https://192.168.100.20:8006/"
+proxmox_api_token = "terraform@pve!provider-token="
+vm_ssh_public_key = "ssh-ed25519 AAAA... вставь свой ключ"
+ci_ssh_public_key = "ssh-ed25519 AAAA... вставь свой ключ"
+playit_secret_key = ""

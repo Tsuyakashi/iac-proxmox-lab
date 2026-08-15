@@ -127,3 +127,8 @@ variable "docker_group" {
   type        = bool
   default     = false
 }
+
+variable "network_bridge" {
+  type    = string
+  default = "vmbr0"
+}
