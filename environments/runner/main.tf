@@ -45,7 +45,7 @@ module "ci_runner" {
   extra_runcmd = [
     "apt-get install -y docker.io curl jq ansible unzip gnupg software-properties-common lsb-release",
     "systemctl enable --now docker",
-    "curl -o /usr/local/bin/terraform http://192.168.100.10:9000/tools/terraform_1.15.8_linux_amd64",
+    "curl -o /usr/local/bin/terraform http://192.168.100.100:9000/tools/terraform_1.15.8_linux_amd64",
     "chmod +x /usr/local/bin/terraform",
     "curl -o /usr/local/bin/mc https://dl.min.io/aistor/mc/release/linux-amd64/mc",
     "chmod +x /usr/local/bin/mc",

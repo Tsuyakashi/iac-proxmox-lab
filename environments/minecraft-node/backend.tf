@@ -1,7 +1,7 @@
 terraform {
   backend "s3" {
     bucket                      = "iac-proxmox-lab-tfstate"
-    key                         = "nodes/terraform.tfstate"
+    key                         = "minecraft-node/terraform.tfstate"
     region                      = "auto"
     endpoints                   = { s3 = "http://192.168.100.100:9000" }
     skip_credentials_validation = true
