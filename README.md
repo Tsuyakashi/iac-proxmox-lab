@@ -28,7 +28,6 @@ this repo (see [CI/CD](#cicd) for how the two connect via a pinned tag).
 │               │     — Terraform state backend, NOT managed          │
 │               │       by Terraform itself, static IP                │
 │               ├── VM: ci-runner (root module: environments/runner/) │
-│               │     — GitHub Actions self-hosted runner             │
 │               └── VM: prod-node / stage-node / dev-node             │
 │                     (root module: environments/nodes/)              │
 └─────────────────────────────────────────────────────────────────────┘
@@ -86,6 +85,25 @@ Consequences of the split:
   reinforced rather than accidental. Changes under `modules/**` *do*
   trigger it, since `environments/nodes` depends on that module.
 
+### Other environments
+
+Two more root modules live under `environments/`, both built on the same
+`modules/proxmox-vm` as `nodes/`, neither wired into `pipeline.yml` — both
+are applied manually, on demand:
+
+- **`poly-nodes/`** — infra for a separate project,
+  [`poly-ci`](https://github.com/tsuyakashi/poly-ci): runner/prod/monitoring
+  nodes, structured the same way as `nodes/`. Currently on hold — see the
+  golden-image note below.
+- **`minecraft-node/`** — a single isolated node (own NAT segment, no
+  access to the rest of the LAN) running a Minecraft server + playit.gg
+  tunnel. Short-lived/situational by nature, not part of the core lab.
+
+`poly-nodes/` clones from a second golden image (VM 9001) on `hdd-storage`
+instead of the main `local-lvm` pool — that disk is currently flaky, so
+9001/`poly-nodes` is WIP and bootstrapped by hand for now (same pattern as
+`proxmox-init.sh` uses for 9000, just not yet scripted).
+
 ### State backend lives off both
 
 Terraform state for both root modules (`environments/nodes/backend.tf` and
@@ -139,7 +157,8 @@ below.
 
 Standard `modules/` + `environments/` split. `modules/proxmox-vm` is the one
 reusable building block — a single cloned VM with a cloud-init snippet — and
-both root modules (`environments/nodes`, `environments/runner`) call it. The
+every root module (`environments/nodes`, `environments/runner`,
+`environments/poly-nodes`, `environments/minecraft-node`) calls it. The
 module owns no backend and no provider config; each environment configures
 those independently, which is what actually enforces the state/lifecycle
 separation described below (not just a folder convention).
@@ -158,7 +177,7 @@ modules/
                                        #   specific provisioning — see below)
 
 environments/
-├── nodes/                            # ROOT MODULE — prod/stage/dev nodes
+├── nodes/                            # ROOT MODULE — prod/stage/dev nodes (in CI)
 │   ├── main.tf                       #   for_each over var.nodes -> module "node"
 │   ├── variables.tf                  #   incl. the "nodes" topology map
 │   ├── outputs.tf                    #   node_ids, node_ips, inventory_path
@@ -166,16 +185,22 @@ environments/
 │   ├── backend.tf                    #   S3 (MinIO/CT 200)
 │   ├── terraform.tfvars.example
 │   └── templates/inventory.tpl       #   ansible inventory template (used only here)
-└── runner/                           # ROOT MODULE — CI runner, own state/lifecycle
-    ├── main.tf                       #   single module "ci_runner" call, dhcp,
-    │                                 #   extra_packages/extra_runcmd/write_files for
-    │                                 #   runner-specific prerequisites (see below)
-    ├── variables.tf
-    ├── outputs.tf                    #   ci_runner_ip
-    ├── providers.tf
-    ├── backend.tf                    #   S3 (MinIO/CT 200) — migrated off local, see
-    │                                 #   Troubleshooting notes for why and how
-    └── terraform.tfvars.example
+├── runner/                           # ROOT MODULE — CI runner, own state/lifecycle
+│   ├── main.tf                       #   single module "ci_runner" call, dhcp,
+│   │                                 #   extra_packages/extra_runcmd/write_files for
+│   │                                 #   runner-specific prerequisites (see below)
+│   ├── variables.tf
+│   ├── outputs.tf                    #   ci_runner_ip
+│   ├── providers.tf
+│   ├── backend.tf                    #   S3 (MinIO/CT 200) — migrated off local, see
+│   │                                 #   Troubleshooting notes for why and how
+│   └── terraform.tfvars.example
+├── poly-nodes/                       # ROOT MODULE — infra for poly-ci, manual apply, WIP
+│   └── ...                           #   same shape as nodes/; clones from VM 9001 on
+│                                     #   hdd-storage (currently flaky — see "Other environments")
+└── minecraft-node/                   # ROOT MODULE — isolated Minecraft node, manual apply
+    ├── network.tf                    #   isolated vmbr1 bridge + NAT/DROP iptables rules
+    └── ...                          #   short-lived/situational, not part of the core lab
 
 .github/workflows/pipeline.yml        # provision (terraform, environments/nodes) + deploy (ansible)
 scripts/
@@ -217,7 +242,8 @@ scripts/
   state file**, it's not a no-op rename. Performed by hand on this repo's
   own state during PR #23. The same `nodes/` vs `runner/` key-namespacing
   later made it straightforward to migrate `environments/runner/`'s state
-  into the same bucket too — see Troubleshooting notes.
+  into the same bucket too — see Troubleshooting notes, and to add
+  `poly-nodes/` and `minecraft-node/` under their own keys later.
 - Moving the VM/cloud-init resources into `modules/proxmox-vm` also meant
   they picked up new state addresses (`module.node["..."]....` instead of
   the old flat `proxmox_virtual_environment_vm.node["..."]`). Adopting this
@@ -229,9 +255,9 @@ scripts/
   in the plan, then removed.
 - `modules/proxmox-vm` gained four optional inputs — `extra_packages`,
   `extra_runcmd`, `write_files`, `docker_group` — so environment-specific
-  provisioning (currently only the runner needs any of this) stays out of
-  the shared base template. `environments/nodes` never sets these, so node
-  VMs are unaffected; see
+  provisioning (currently only the runner and minecraft-node need any of
+  this) stays out of the shared base template. `environments/nodes` never
+  sets these, so node VMs are unaffected; see
   [Runner host prerequisites](#runner-host-prerequisites-automated-via-cloud-init)
   below for how the runner uses them.
 - Both VM resources gained an explicit `serial_device`/`vga` block (matching
@@ -244,6 +270,10 @@ scripts/
   why it's there.
 - `minio-lxc-init.sh` now assigns CT 200 a static IP instead of DHCP — see
   the DHCP-drift entry in Troubleshooting notes for why.
+- `modules/proxmox-vm` gained `network_bridge` (default `vmbr0`, overridable
+  — e.g. `vmbr1` for `minecraft-node`'s isolated segment) and per-VM
+  `datastore_id_disk`/`disk_size` inputs, to support `poly-nodes` and
+  `minecraft-node` without forking the module.
 
 ## Quickstart
 
@@ -301,7 +331,10 @@ notes). Idempotent.
 The API token secret is printed to `/root/terraform-token.json` on first
 run — copy it into `terraform.tfvars`, then consider deleting that file from
 the host. (Plaintext-on-disk is an acceptable trade-off for a local lab; a
-production setup would push this into Vault or similar instead.)
+production setup would push this into Vault or similar instead. The same
+trade-off applies to any secret injected via cloud-init — e.g.
+`minecraft-node`'s playit.gg key — since cloud-init snippets are readable
+from the Proxmox datastore/API.)
 
 **SSH key auth is required, not just API access.** The `bpg/proxmox`
 provider uploads cloud-init snippets over SSH (not the REST API), so
@@ -327,9 +360,8 @@ notes for why). Not a Terraform resource by design — see
 and console URL on success.
 
 Then, via the printed console URL, create a bucket named
-`iac-proxmox-lab-tfstate` and confirm `endpoints.s3` in both
-`environments/nodes/backend.tf` and `environments/runner/backend.tf` match
-the static IP set in `minio-lxc-init.sh`.
+`iac-proxmox-lab-tfstate` and confirm `endpoints.s3` in every environment's
+`backend.tf` match the static IP set in `minio-lxc-init.sh`.
 
 **Optional, one-time:** if the runner will need `terraform`/`mc` binaries
 (it does — see [Runner host prerequisites](#runner-host-prerequisites-automated-via-cloud-init)
@@ -374,6 +406,15 @@ that's the whole point of the split. See
 same MinIO bucket as the nodes' state, under a separate `runner/` key — see
 Troubleshooting notes for why a local backend here turned out to still be a
 single point of failure (laptop loss, not just Proxmox loss).
+
+### 7. (Optional, manual, as-needed) poly-nodes / minecraft-node
+
+Same pattern as steps 5/6 — `cd` into `environments/poly-nodes/` or
+`environments/minecraft-node/`, copy the `.tfvars.example`, `terraform init`,
+`terraform apply`. Neither is wired into `pipeline.yml`; both are meant to
+be stood up, used, and torn down on demand rather than staying live like
+`nodes/`. See [Other environments](#other-environments) above for what each
+one is.
 
 ### Runner host prerequisites (automated via cloud-init)
 
@@ -454,8 +495,11 @@ triggered on `workflow_dispatch` or a push to `main` touching
 `environments/nodes` depends on `modules/proxmox-vm` — a module change
 needs the same `apply` as an environment change; see
 [Architecture](#two-independent-root-modules-on-purpose)). Pushes under
-`environments/runner/**` deliberately do **not** trigger this workflow —
-the runner is applied by hand, never from its own CI job.
+`environments/runner/**`, `environments/poly-nodes/**`, and
+`environments/minecraft-node/**` deliberately do **not** trigger this
+workflow — the runner is applied by hand, never from its own CI job, and
+`poly-nodes`/`minecraft-node` are spin-up/tear-down environments, not
+persistent infra like `nodes/`.
 
 1. **provision** — `terraform apply` against the `environments/nodes` root
    module, producing `environments/nodes/inventory.ini` via the `local_file`
@@ -657,9 +701,10 @@ against real `HTTP 403` responses, not from a single source of truth:
   Terraform `for` loop but zero items produces a bare `packages:` key with
   nothing under it, which YAML reads as `null`, not an empty list — cloud-init's
   schema requires an array. This affects any VM with `extra_packages = []`
-  (i.e. every node, since only the runner sets packages). Fixed by wrapping
-  the whole `packages:` block in `%{ if length(extra_packages) > 0 ~}`, so
-  the key is omitted entirely rather than emitted empty.
+  (i.e. every node, since only the runner and minecraft-node set packages).
+  Fixed by wrapping the whole `packages:` block in
+  `%{ if length(extra_packages) > 0 ~}`, so the key is omitted entirely
+  rather than emitted empty.
 
 - **Multi-line `write_files` content breaks YAML if the block literal's
   first line isn't indented.** Terraform's `indent(n, string)` indents every
@@ -815,22 +860,22 @@ against real `HTTP 403` responses, not from a single source of truth:
   which pin their address via cloud-init static config (a specific
   `mac_address` + `ip_config`), `minio-lxc-init.sh` originally created CT
   200 with `ip=dhcp`. The address drifted at least twice
-  (`192.168.100.13` → `192.168.100.10`), surfacing indirectly and
-  unhelpfully each time: `backend.tf` in both `environments/nodes` and
-  `environments/runner` silently pointed at a dead IP (`no route to host`
-  on `terraform init`), and the hardcoded MinIO URL in
-  `environments/runner/main.tf`'s `extra_runcmd` (for pulling the
-  `terraform`/`mc` binaries) went stale right along with it — three
-  separate places that had to be manually re-synced by hand after
-  noticing, with no single point that would have caught the drift
-  earlier. Root cause was almost certainly one of the hard-power-loss
-  incidents on the host (see the `vnet0` and thin-pool entries above)
-  restarting CT 200 and having the DHCP lease land differently. Fixed by
-  pinning a static IP for CT 200 in `minio-lxc-init.sh`
-  (`ip=<addr>/24,gw=<gateway>` on `net0`, same pattern nodes already use),
-  with an idempotent guard so re-running the script against an
-  already-existing CT on a stale DHCP config corrects it (`pct set` +
-  reboot) instead of silently doing nothing.
+  (`192.168.100.13` → `192.168.100.10` → `192.168.100.100`), surfacing
+  indirectly and unhelpfully each time: `backend.tf` in every environment
+  silently pointed at a dead IP (`no route to host` on `terraform init`),
+  and the hardcoded MinIO URL in `environments/runner/main.tf`'s
+  `extra_runcmd` (for pulling the `terraform`/`mc` binaries) went stale
+  right along with it — three separate places that had to be manually
+  re-synced by hand after noticing, with no single point that would have
+  caught the drift earlier. Root cause was almost certainly one of the
+  hard-power-loss incidents on the host (see the `vnet0` and thin-pool
+  entries above) restarting CT 200 and having the DHCP lease land
+  differently. Fixed by pinning a static IP for CT 200 in
+  `minio-lxc-init.sh` (`ip=<addr>/24,gw=<gateway>` on `net0`, same pattern
+  nodes already use), with an idempotent guard so re-running the script
+  against an already-existing CT on a stale DHCP config corrects it
+  (`pct set` + reboot) instead of silently doing nothing. Now standardized
+  on `192.168.100.100` across all environments' `backend.tf`.
 
 ## Status
 
@@ -841,8 +886,8 @@ against real `HTTP 403` responses, not from a single source of truth:
       assignment all working
 - [x] Runner split into an independent root module with its own backend
 - [x] State backend (MinIO/CT 200) moved off both the runner and the node
-      VMs it describes, and pinned to a static IP so it doesn't drift on
-      restart
+      VMs it describes, and pinned to a static IP (`192.168.100.100`) so it
+      doesn't drift on restart
 - [x] Runner state migrated from a local backend onto the same MinIO
       bucket as the nodes (separate `runner/` key) — protects against
       laptop/disk loss while the runner VM itself keeps running, distinct
@@ -856,11 +901,11 @@ against real `HTTP 403` responses, not from a single source of truth:
 - [x] `docker`/`github-runner` Ansible roles are provisioning-flow
       agnostic (`ansible_user`-driven), no more hardcoded `vagrant`
 - [x] Node/runner VM provisioning extracted into a reusable module
-      (`modules/proxmox-vm`) shared by both root modules — no more
-      duplicated resource blocks between `nodes.tf` and `runner/runner.tf`.
-      Node *count* is still driven by the `var.nodes` map's default value
-      (not yet parameterized from outside the module/environment), so
-      adding a node today still means editing that default rather than
+      (`modules/proxmox-vm`) shared by every root module — no more
+      duplicated resource blocks between environments.
+      Node *count* is still driven by each environment's `var.nodes` map
+      default (not yet parameterized from outside the module/environment),
+      so adding a node today still means editing that default rather than
       passing in a wholly external topology.
 - [x] Node/runner VMs have an explicit serial console (`serial_device`/`vga`
       blocks, matching the golden image), so `qm terminal <vmid>` is a
@@ -885,6 +930,14 @@ against real `HTTP 403` responses, not from a single source of truth:
       catches up. Revisit node/runner `disk_size` sizing, or add another
       physical disk to the thin pool, before this needs a third manual
       recovery.
+- [x] `environments/minecraft-node` added — isolated node (own NAT
+      segment, no LAN access), manually applied, short-lived by design.
+- [x] `environments/poly-nodes` added — infra for
+      [`poly-ci`](https://github.com/tsuyakashi/poly-ci), same shape as
+      `nodes/`. Blocked on the second golden image (VM 9001), which lives
+      on a currently-flaky HDD (`hdd-storage`) — verified working when
+      pointed at SSD storage instead, so this is WIP pending a decision on
+      that disk.
 - [ ] Migrate onto dedicated hardware once available
 - [x] `swarm-lab`'s `Vagrantfile` stays — deliberately kept so `swarm-lab`
       remains a fully independent, self-contained project that can be spun
