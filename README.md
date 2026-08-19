@@ -12,23 +12,23 @@ this repo (see [CI/CD](#cicd) for how the two connect via a pinned tag).
 ## Architecture
 
 ```
-┌───────────────────────────────┐   ┌─────────────────────────────────────┐
-│ pve-rog (nested, G750JX host)  │   │ pve (bare metal, i5-4460/8GB/465GB)  │
-│ 192.168.100.20 — 6 vCPU/18GB   │   │ 192.168.100.30 — 4 vCPU/8GB           │
-│ peak-load capacity              │   │ must-have always-on services          │
-│  │                              │   │  │                                    │
-│  └── vmbr0 ─────────┐          │   │  └── vmbr0 ─────────┐                 │
-│       ├ VM 9000 golden image    │   │       ├ VM 9000 golden image (own)    │
-│       ├ prod/stage/dev nodes    │   │       ├ CT 200: minio (state backend) │
-│       └ poly-nodes (WIP)        │   │       ├ VM: ci-runner                 │
-│                                  │   │       └ NFS export → shared-storage   │
-└──────────────┬──────────────────┘   └──────────────┬────────────────────────┘
-               │                                       │
+┌────────────────────────────────┐       ┌───────────────────────────────────────┐
+│ pve-rog (nested, G750JX host)  │       │ pve (bare metal, i5-4460/8GB/465GB)   │
+│ 192.168.100.20 — 6 vCPU/18GB   │       │ 192.168.100.30 — 4 vCPU/8GB           │
+│ peak-load capacity             │       │ must-have always-on services          │
+│  │                             │       │  │                                    │
+│  └── vmbr0 ─────────┐          │       │  └── vmbr0 ─────────┐                 │
+│       ├ VM 9000 golden image   │       │       ├ VM 9000 golden image (own)    │
+│       ├ prod/stage/dev nodes   │       │       ├ CT 200: minio (state backend) │
+│       └ poly-nodes (WIP)       │       │       ├ VM: ci-runner                 │
+│                                │       │       └ NFS export → shared-storage   │
+└──────────────┬─────────────────┘       └──────────────┬────────────────────────┘
+               │                                        │
                └──────────────── corosync/knet ─────────┘
                             lab-cluster (2 nodes)
                                      │
-                         ┌───────────┴───────────┐
-                         │ Zenbook — QDevice only │
+                         ┌───────────┴─────────────┐
+                         │ Zenbook — QDevice only  │
                          │ 192.168.100.12          │
                          │ corosync-qnetd arbiter, │
                          │ no guests               │
