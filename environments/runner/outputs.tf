@@ -1,9 +1,9 @@
-output "ci_runner_ip" {
-  description = "IP раннера в LAN 192.168.100.0/24, как его отрепортил guest agent (dhcp-адрес)."
-  value = try(
-    [for ip in module.ci_runner.ipv4_addresses :
-      ip[0] if length(ip) > 0 && startswith(ip[0], "192.168.100.")
-    ][0],
-    null
-  )
+output "node_ids" {
+  description = "Proxmox VM ID по каждой ноде."
+  value       = { for k, m in module.ci_runner : k => m.vm_id }
+}
+
+output "node_ips" {
+  description = "Статические IP нод (из var.nodes — известны заранее, не нужно запрашивать у guest agent)."
+  value       = { for k, v in var.nodes : k => split("/", v.ip)[0] }
 }

@@ -10,7 +10,7 @@
 # applied at some unknown later time.
 #
 # Usage:
-#   GH_RUNNER_PAT=<pat> ./scripts/register-github-runner.sh <runner-ip>
+#   ssh ubuntu@<runner-ip> 'GH_RUNNER_PAT=<pat> bash -s' < ./scripts/register-github-runner.sh <runner-ip>
 #
 # Requires:
 #   - GH_RUNNER_PAT: classic PAT with 'repo' scope, or fine-grained with
@@ -43,7 +43,6 @@ if [ -z "${TOKEN}" ] || [ "${TOKEN}" = "null" ]; then
 fi
 
 echo "Configuring runner on ${RUNNER_IP}..."
-ssh ubuntu@"${RUNNER_IP}" bash -s <<EOF
 set -e
 mkdir -p ~/actions-runner && cd ~/actions-runner
 
@@ -64,6 +63,6 @@ fi
 
 sudo ./svc.sh install ubuntu
 sudo ./svc.sh start
-EOF
+
 
 echo "Done. Check registration: https://github.com/${REPO}/settings/actions/runners"
