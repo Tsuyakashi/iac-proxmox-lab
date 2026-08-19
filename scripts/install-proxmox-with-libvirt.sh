@@ -33,8 +33,8 @@ if ! ip -4 addr show br0 | grep -q "inet "; then
 fi
 
 # Download binary if not exist yet
-if [ ! -f "proxmox-ve_8.4-1.iso" ]; then
-    wget "https://enterprise.proxmox.com/iso/proxmox-ve_8.4-1.iso"
+if [ ! -f "proxmox-ve_9.2-1.iso" ]; then
+    wget "https://enterprise.proxmox.com/iso/proxmox-ve_9.2-1.iso"
 fi
 
 # Start VM if not exist yet
@@ -44,7 +44,7 @@ if ! virsh list --all | grep -q "proxmox-lab"; then
         --memory 18432 --vcpus 6 \
         --cpu host-passthrough \
         --disk size=60,bus=virtio \
-        --cdrom proxmox-ve_8.4-1.iso \
+        --cdrom proxmox-ve_9.2-1.iso \
         --network bridge=br0,model=virtio \
         --graphics vnc,listen=0.0.0.0 \
         --os-variant debian12 \
