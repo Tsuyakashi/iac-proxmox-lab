@@ -24,7 +24,7 @@ variable "proxmox_node" {
 variable "template_vm_id" {
   description = "VM ID of the cloud-init template to clone from"
   type        = number
-  default     = 9001
+  default     = 9000
 }
 
 variable "vm_ssh_public_key" {
@@ -55,8 +55,8 @@ variable "nodes" {
     disk_size         = optional(number, 10)
   }))
   default = {
-    "runner-node"     = { tag_name = "runner", memory = 2048, cores = 2, mac = "BC:24:11:0F:A0:B3", ip = "192.168.100.110/24", datastore_id_disk = "hdd-storage", disk_size = 20 }
-    "prod-node"       = { tag_name = "prod", memory = 1024, cores = 1, mac = "BC:24:11:7B:D1:46", ip = "192.168.100.111/24", datastore_id_disk = "hdd-storage", disk_size = 20 }
-    "monitoring-node" = { tag_name = "monitoring", memory = 2048, cores = 2, mac = "BC:24:11:0B:21:33", ip = "192.168.100.112/24", datastore_id_disk = "hdd-storage", disk_size = 20 }
+    "runner-node"     = { tag_name = "runner", memory = 2048, cores = 2, mac = "BC:24:11:0F:A0:B3", ip = "192.168.100.110/24" }
+    "prod-node"       = { tag_name = "prod", memory = 1024, cores = 1, mac = "BC:24:11:7B:D1:46", ip = "192.168.100.111/24" }
+    "monitoring-node" = { tag_name = "monitoring", memory = 2048, cores = 2, mac = "BC:24:11:0B:21:33", ip = "192.168.100.112/24" }
   }
 }
