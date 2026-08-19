@@ -34,6 +34,7 @@ runcmd:
   - systemctl enable --now qemu-guest-agent
   - hostnamectl set-hostname ${hostname}
   - sed -i "s/^127.0.1.1.*/127.0.1.1\t${hostname}/" /etc/hosts || echo "127.0.1.1\t${hostname}" >> /etc/hosts
+  - for i in 1 2 3; do ping -c1 -W2 192.168.100.3 && break || sleep 2; done || true
 %{ for f in write_files ~}
   - chown ${f.owner} ${f.path}
 %{ endfor ~}

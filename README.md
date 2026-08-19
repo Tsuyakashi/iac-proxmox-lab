@@ -12,23 +12,23 @@ this repo (see [CI/CD](#cicd) for how the two connect via a pinned tag).
 ## Architecture
 
 ```
-┌───────────────────────────────┐   ┌─────────────────────────────────────┐
-│ pve-rog (nested, G750JX host)  │   │ pve (bare metal, i5-4460/8GB/465GB)  │
-│ 192.168.100.20 — 6 vCPU/18GB   │   │ 192.168.100.30 — 4 vCPU/8GB           │
-│ peak-load capacity              │   │ must-have always-on services          │
-│  │                              │   │  │                                    │
-│  └── vmbr0 ─────────┐          │   │  └── vmbr0 ─────────┐                 │
-│       ├ VM 9000 golden image    │   │       ├ VM 9000 golden image (own)    │
-│       ├ prod/stage/dev nodes    │   │       ├ CT 200: minio (state backend) │
-│       └ poly-nodes (WIP)        │   │       ├ VM: ci-runner                 │
-│                                  │   │       └ NFS export → shared-storage   │
-└──────────────┬──────────────────┘   └──────────────┬────────────────────────┘
-               │                                       │
+┌────────────────────────────────┐       ┌───────────────────────────────────────┐
+│ pve-rog (nested, G750JX host)  │       │ pve (bare metal, i5-4460/8GB/465GB)   │
+│ 192.168.100.20 — 6 vCPU/18GB   │       │ 192.168.100.30 — 4 vCPU/8GB           │
+│ peak-load capacity             │       │ must-have always-on services          │
+│  │                             │       │  │                                    │
+│  └── vmbr0 ─────────┐          │       │  └── vmbr0 ─────────┐                 │
+│       ├ VM 9000 golden image   │       │       ├ VM 9000 golden image (own)    │
+│       ├ prod/stage/dev nodes   │       │       ├ CT 200: minio (state backend) │
+│       └ poly-nodes (WIP)       │       │       ├ VM: ci-runner                 │
+│                                │       │       └ NFS export → shared-storage   │
+└──────────────┬─────────────────┘       └──────────────┬────────────────────────┘
+               │                                        │
                └──────────────── corosync/knet ─────────┘
                             lab-cluster (2 nodes)
                                      │
-                         ┌───────────┴───────────┐
-                         │ Zenbook — QDevice only │
+                         ┌───────────┴─────────────┐
+                         │ Zenbook — QDevice only  │
                          │ 192.168.100.12          │
                          │ corosync-qnetd arbiter, │
                          │ no guests               │
@@ -48,6 +48,14 @@ it) was wiped and handed off to a separate Windows box — it was never part
 of the Proxmox storage plan. The Zenbook runs `corosync-qnetd` and nothing
 else — no VMs, just a quorum vote so the two real nodes survive either one
 going down without a stuck-at-1-vote cluster.
+
+**Physical LAN topology, one level below the diagram above:** `.30`
+(bare metal) and `.3` (a Keenetic router) both uplink independently into
+`.1` — a Промсвязь MT-PON-AT-4 GPON ONT acting as the L2 hub between them.
+The Zenbook (`.12`) sits behind `.3`, not behind `.30`. This matters for
+new-host reachability — see the MT-PON-AT-4 entry in
+[Troubleshooting notes](#troubleshooting-notes-things-that-actually-broke)
+below.
 
 **Why nested is still half the setup, not fully replaced:** dedicated
 hardware for the whole lab was the original plan, but only one machine
@@ -211,8 +219,9 @@ modules/
     ├── outputs.tf                    #   vm_id, ipv4_addresses
     ├── README.md
     └── templates/user-data.yml.tpl   #   cloud-init template (users, packages, guest agent,
-                                       #   optional write_files/extra runcmd for environment-
-                                       #   specific provisioning — see below)
+                                      #   wake-ping to .3 for the MT-PON-AT-4 L2 quirk, optional
+                                      #   write_files/extra runcmd for environment-specific
+                                      #   provisioning — see below)
 
 environments/
 ├── nodes/                            # ROOT MODULE — prod/stage/dev nodes (in CI)
@@ -238,7 +247,7 @@ environments/
 │                                     #   hdd-storage (currently flaky — see "Other environments")
 └── minecraft-node/                   # ROOT MODULE — isolated Minecraft node, manual apply
     ├── network.tf                    #   isolated vmbr1 bridge + NAT/DROP iptables rules
-    └── ...                          #   short-lived/situational, not part of the core lab
+    └── ...                           #   short-lived/situational, not part of the core lab
 
 .github/workflows/pipeline.yml        # provision (terraform, environments/nodes) + deploy (ansible)
 scripts/
@@ -251,7 +260,7 @@ scripts/
 ├── minio-lxc-init.sh                 # Proxmox-side (.30): MinIO LXC (state backend), NOT
 │                                     #   terraform-managed, statically-addressed
 └── shared-storage-creation.sh        # Proxmox-side (.30): NFS export prep for the cluster-wide
-                                       #   shared-storage datastore (see Architecture above)
+                                      #   shared-storage datastore (see Architecture above)
 ```
 
 **What changed vs. the original flat layout**, and why:
@@ -320,6 +329,14 @@ scripts/
 - `scripts/shared-storage-creation.sh` added — NFS export prep on `.30` for
   the cluster-wide `shared-storage` datastore (see
   [Architecture](#shared-storage-30-nfs) above).
+- The base cloud-init `runcmd` (shared by every environment via
+  `modules/proxmox-vm/templates/user-data.yml.tpl`) now retries a ping to
+  `192.168.100.3` a few times right after the network stage — works around
+  a known MT-PON-AT-4 quirk where a new host's MAC isn't learned by devices
+  on the far side of the ONT until the host itself sends outbound traffic;
+  see the corresponding Troubleshooting notes entry. Harmless no-op on
+  `minecraft-node` (isolated `vmbr1` segment has no route to `.3`; the
+  command is wrapped so a failure there doesn't block the rest of `runcmd`).
 
 ## Quickstart
 
@@ -987,6 +1004,95 @@ for exactly what was dropped.
   (`pct set` + reboot) instead of silently doing nothing. Now standardized
   on `192.168.100.100` across all environments' `backend.tf`.
 
+- **A newly created CT on the bare-metal node (`.30`) was completely
+  unreachable from the rest of the LAN — `Destination Host Unreachable`
+  from every other host, including the CT's own gateway — despite the
+  CT's own network config being entirely correct.** `pct config`,
+  `ip a`/`ip route` inside the CT, and even `ping` *from the Proxmox host
+  itself* to the CT's IP all looked fine — but that last check is a false
+  positive: host↔guest traffic on the same Linux bridge doesn't have to
+  leave the bridge or touch the physical NIC at all, so it proves nothing
+  about external reachability. `tcpdump -i vmbr0 -n arp` on the host, run
+  *simultaneously* with a ping attempt from another LAN host, showed
+  literally nothing — the ARP request for the CT's IP never reached the
+  bridge's physical side. A single outbound ping *from inside the CT*
+  (`pct exec <id> -- ping <any-external-ip>`) put the CT's MAC on the wire
+  as a *source* address, and external ping worked immediately afterward
+  with no other change. At the time this looked like ordinary
+  forwarding-table aging on an upstream switch (entries age out after
+  ~5 minutes of silence on most gear). It turned out to be more specific
+  than that — see the MT-PON-AT-4 entry below, which generalizes this to
+  every new host on `.30`, not just CTs. Two diagnostic dead ends worth
+  flagging so they don't eat time on a repeat: (1) the *client's*
+  `ip neigh` table can cache a stale `FAILED` entry for the target IP and
+  short-circuit further `ping` attempts locally without ever generating a
+  new ARP request — `ip neigh del <ip> dev <iface>` clears it, but the
+  entry can silently reappear as `FAILED` on the very next attempt if the
+  root cause isn't fixed yet, which looks like the flush didn't work but
+  did; (2) prefer `arping` (raw L2 ARP request, ignores the
+  routing/neighbor cache entirely) over repeated plain `ping` when
+  diagnosing this class of problem — it gives a clean, uncached signal of
+  whether the L2 path actually works.
+
+- **The CT 200 unreachable-until-pinged behavior above turned out to be a
+  general MT-PON-AT-4 quirk, not CT-specific — newly created node VMs
+  showed the identical symptom, and it's not simple forwarding-table
+  aging.** After the CT 200 incident, `prod-node`/`stage-node`/`dev-node`
+  (freshly cloned via `terraform apply`, all static-IP with
+  `wait_for_ip_disabled = true`) were unreachable from both the Zenbook
+  and `.20` immediately after provisioning — `Destination Host
+  Unreachable` — while `ssh bare-proxmox ping <node-ip>` (same-bridge
+  traffic, proves nothing about external reachability, see the entry
+  above) worked instantly. The physical topology explains it: `.30` and
+  `.3` (the Keenetic) both uplink independently into `.1` — a Промсвязь
+  MT-PON-AT-4 GPON ONT acting as the L2 hub between them (see
+  [Architecture](#architecture) above) — so a device behind `.3` (e.g.
+  the Zenbook at `.12`) can only learn a new host's MAC once traffic for
+  it has actually transited `.1`. A single outbound ping from inside the
+  new VM (over `ssh -J bare-proxmox`) sometimes needed two or three
+  attempts before external ping succeeded, and the first successful
+  replies showed unusually high, *decaying* RTT (thousands of ms down to
+  single-digit ms) rather than a clean instant fix — this isn't packet
+  loss, it's the ONT's own L2/forwarding state catching up over a couple
+  of seconds. Confirmed via search that unreachable-until-pinged is a
+  known MT-PON-AT-4 behavior independent of this LAN or Proxmox — other
+  users of this exact model report the same workaround (pinging devices
+  to each other to "wake" the network). Setting a static DNS server on
+  the Keenetic's WAN/broadband page does **not** help — DNS resolution
+  and L2/ARP forwarding are unrelated, and every reachability check here
+  already targets raw IPs, not hostnames. Fixed at the source instead of
+  relying on a manual `ssh -J` after every provision: the base cloud-init
+  `runcmd` (shared by every environment via
+  `modules/proxmox-vm/templates/user-data.yml.tpl`) now retries a ping to
+  `192.168.100.3` a few times right after the network stage, so every new
+  VM "wakes up" the L2 path on its own during boot, before anything tries
+  to reach it from outside `.30`. Harmless no-op on `minecraft-node`
+  (isolated `vmbr1` segment has no route to `.3`; wrapped so the failure
+  doesn't block the rest of `runcmd`). Worth remembering this also means
+  `pipeline.yml`'s `Wait for nodes to finish booting` step could
+  theoretically hit the same wall if the self-hosted runner ever ends up
+  behind `.3` instead of `.30` — not the current setup, but worth
+  revisiting if the runner's network placement changes.
+
+- **Bare-metal node's `apt update` failed on `enterprise.proxmox.com` with
+  `401 Unauthorized` for both `pve` and `ceph-squid`.** A fresh Proxmox VE
+  install points at the subscription-only enterprise repos by default,
+  which 401 without a paid subscription. On Proxmox VE 9.x the repo config
+  moved to `deb822` format — `/etc/apt/sources.list.d/*.sources`, not the
+  old `*.list` files a stale guide/muscle-memory might reach for first (the
+  old-format commands are silent no-ops here: `sed` on a `.list` file that
+  doesn't exist just errors `No such file or directory`, which is easy to
+  miss in a longer command chain). Fixed by removing (or disabling)
+  `pve-enterprise.sources`/`ceph.sources` and adding a `pve-no-subscription`
+  entry in the same `deb822` format:
+  ```
+  Types: deb
+  URIs: http://download.proxmox.com/debian/pve
+  Suites: trixie
+  Components: pve-no-subscription
+  Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+  ```
+
 - **`pvecm add` without an explicit `--link0` silently wrote the wrong
   address into `corosync.conf`, splitting the cluster in two.** Joining a
   second node with plain `pvecm add <first-node-ip>` printed "No cluster
@@ -1062,62 +1168,6 @@ for exactly what was dropped.
   what was asked (ignore cluster state, mount `/etc/pve` writable and
   local-only), not a warning that something is already broken.
 
-- **Bare-metal node's `apt update` failed on `enterprise.proxmox.com` with
-  `401 Unauthorized` for both `pve` and `ceph-squid`.** A fresh Proxmox VE
-  install points at the subscription-only enterprise repos by default,
-  which 401 without a paid subscription. On Proxmox VE 9.x the repo config
-  moved to `deb822` format — `/etc/apt/sources.list.d/*.sources`, not the
-  old `*.list` files a stale guide/muscle-memory might reach for first (the
-  old-format commands are silent no-ops here: `sed` on a `.list` file that
-  doesn't exist just errors `No such file or directory`, which is easy to
-  miss in a longer command chain). Fixed by removing (or disabling)
-  `pve-enterprise.sources`/`ceph.sources` and adding a `pve-no-subscription`
-  entry in the same `deb822` format:
-  ```
-  Types: deb
-  URIs: http://download.proxmox.com/debian/pve
-  Suites: trixie
-  Components: pve-no-subscription
-  Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
-  ```
-
-- **A CT on the bare-metal node (`.30`) was completely unreachable from
-  the rest of the LAN — `Destination Host Unreachable` from every other
-  host, including the CT's own gateway — despite the CT's own network
-  config being entirely correct.** `pct config`, `ip a`/`ip route` inside
-  the CT, and even `ping` *from the Proxmox host itself* to the CT's IP all
-  looked fine — but that last check is a false positive: host↔guest traffic
-  on the same Linux bridge doesn't have to leave the bridge or touch the
-  physical NIC at all, so it proves nothing about external reachability.
-  `tcpdump -i vmbr0 -n arp` on the host, run *simultaneously* with a ping
-  attempt from another LAN host, showed literally nothing — the ARP
-  request for the CT's IP never reached the bridge's physical side. Root
-  cause: the CT's veth had never sent a single outbound frame through the
-  host's physical NIC before this point, so the upstream L2 device (the
-  home router/modem the host is plugged into) had no forwarding-table
-  entry for that MAC — and unlike a bridge that floods unknown-unicast
-  traffic to every port by default, this device apparently doesn't, so
-  inbound frames addressed to an unlearned MAC were silently dropped
-  rather than flooded through. A single outbound ping *from inside the
-  CT* (`pct exec <id> -- ping <any-external-ip>`) put the CT's MAC on the
-  wire as a *source* address, the upstream device learned it, and external
-  ping worked immediately afterward with no other change. Likely not
-  permanent — forwarding-table entries age out (default ~5 minutes of
-  silence on most switches) — so a CT/VM that stays completely idle after
-  creation may need this "wake" ping again, or benefits from a periodic
-  outbound keepalive (cron ping, NTP sync, etc.) if it's expected to be
-  silent for long stretches. Two diagnostic dead ends worth flagging so
-  they don't eat time on a repeat: (1) the *client's* `ip neigh` table can
-  cache a stale `FAILED` entry for the target IP and short-circuit further
-  `ping` attempts locally without ever generating a new ARP request — `ip
-  neigh del <ip> dev <iface>` clears it, but the entry can silently
-  reappear as `FAILED` on the very next attempt if the root cause isn't
-  fixed yet, which looks like the flush didn't work but did; (2) prefer
-  `arping` (raw L2 ARP request, ignores the routing/neighbor cache
-  entirely) over repeated plain `ping` when diagnosing this class of
-  problem — it gives a clean, uncached signal of whether the L2 path
-  actually works.
-
 ## Status
 
 - [x] Two-node Proxmox cluster (`lab-cluster`) — one nested (`.20`, peak
@@ -1189,6 +1239,11 @@ for exactly what was dropped.
       Architecture above)
 - [x] Cluster-wide NFS shared storage (`shared-storage`, hosted on `.30`)
       registered for ISO/template/backup content
+- [x] New-host unreachability on `.30` (MT-PON-AT-4 L2 quirk — see
+      Troubleshooting notes) is now handled automatically for every
+      environment via a wake-ping in the shared base cloud-init `runcmd`,
+      instead of relying on a manual `ssh -J bare-proxmox` after each
+      provision.
 - [ ] Migrate MinIO (CT 200) and the CI runner onto `.30` specifically
       (currently redeployed fresh post-cluster rather than moved; the
       state/backend split above already makes this safe to do whenever)
