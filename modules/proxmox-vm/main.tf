@@ -42,9 +42,12 @@ resource "proxmox_virtual_environment_vm" "this" {
   node_name = var.proxmox_node
   tags      = var.tags
 
+  migrate = var.migrate
+
   clone {
-    vm_id = var.template_vm_id
-    full  = true
+    vm_id     = var.template_vm_id
+    node_name = coalesce(var.template_node, var.proxmox_node)
+    full      = true
   }
 
   agent {

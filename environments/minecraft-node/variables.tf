@@ -45,9 +45,20 @@ variable "nodes" {
     cores    = number
     mac      = string
     ip       = string # CIDR, e.g. "192.168.100.21/24"
+
+    proxmox_node      = optional(string)
+    datastore_id_disk = optional(string, "local-lvm")
   }))
   default = {
-    "minecraft-node" = { tag_name = "mc", memory = 4096, cores = 4, mac = "BC:24:11:4E:74:3B", ip = "10.10.10.50/24" }
+    "minecraft-node" = {
+      tag_name          = "mc",
+      memory            = 4096,
+      cores             = 4,
+      mac               = "BC:24:11:4E:74:3B",
+      ip                = "10.10.10.50/24",
+      proxmox_node      = "pve-rog",
+      datastore_id_disk = "shared-storage"
+    }
   }
 }
 
