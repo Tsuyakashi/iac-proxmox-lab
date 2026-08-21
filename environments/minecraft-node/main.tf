@@ -9,13 +9,17 @@ module "node" {
   source   = "../../modules/proxmox-vm"
   for_each = var.nodes
 
-  name           = each.key
-  proxmox_node   = var.proxmox_node
-  template_vm_id = var.template_vm_id
-  tags           = [each.value.tag_name]
-  cores          = each.value.cores
-  memory         = each.value.memory
-  mac_address    = each.value.mac
+  name              = each.key
+  template_vm_id    = var.template_vm_id
+  tags              = [each.value.tag_name]
+  cores             = each.value.cores
+  memory            = each.value.memory
+  mac_address       = each.value.mac
+  datastore_id_disk = each.value.datastore_id_disk
+
+  template_node = "pve"
+  proxmox_node  = coalesce(each.value.proxmox_node, var.proxmox_node)
+  migrate       = true # временно, на время миграции
 
   network_bridge = "vmbr1"
 

@@ -132,3 +132,15 @@ variable "network_bridge" {
   type    = string
   default = "vmbr0"
 }
+
+variable "migrate" {
+  description = "Использовать live migration API при смене node_name вместо destroy/recreate."
+  type        = bool
+  default     = false
+}
+
+variable "template_node" {
+  description = "Node where the golden image template lives. Defaults to var.proxmox_node (same-node clone, original behavior)."
+  type        = string
+  default     = null
+}

@@ -6,6 +6,12 @@
 # к MinIO/runner/остальной LAN.
 
 resource "proxmox_network_linux_bridge" "isolated" {
+  # TODO: node_name здесь берётся из root-level var.proxmox_node, а VM теперь
+  # целится через var.nodes["minecraft-node"].proxmox_node (main.tf). Сейчас
+  # они совпадают только потому, что оба вручную выставлены на "pve-rog" —
+  # это две независимые точки правды, которые могут молча разойтись при
+  # следующем изменении topology. Свести к одному источнику: брать отсюда
+  # var.nodes["minecraft-node"].proxmox_node вместо отдельного var.proxmox_node.
   node_name = var.proxmox_node
   name      = "vmbr1"
   address   = "${var.isolated_gateway}/24"
