@@ -48,10 +48,11 @@ variable "nodes" {
   }))
   default = {
     "immich-node" = {
-      tag_name = "immich",
-      memory   = 4096,
-      cores    = 4,
-      ip       = "192.168.100.60/24"
+      tag_name  = "immich",
+      memory    = 4096,
+      cores     = 4,
+      disk_size = 70,
+      ip        = "192.168.100.60/24"
     }
   }
 }
