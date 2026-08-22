@@ -30,6 +30,12 @@ variable "cores" {
   type        = number
 }
 
+variable "cpu_type" {
+  description = "CPU type для гостя. 'host' — 1:1 флаги физического CPU, ломает миграцию между разнородными нодами."
+  type        = string
+  default     = "kvm64"
+}
+
 variable "memory" {
   description = "Выделенная память, MB."
   type        = number
