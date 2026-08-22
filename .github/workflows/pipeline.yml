@@ -2,13 +2,16 @@
 
 name: Provision & Deploy
 
+# on:
+#   workflow_dispatch:
+#   push:
+#     branches: [main]
+#     # modules/** — потому что environments/nodes зависит от modules/proxmox-vm;
+#     # правки модуля должны прогонять тот же apply, что и правки самого environment.
+#     paths: ['environments/nodes/**', 'modules/**']
+
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    # modules/** — потому что environments/nodes зависит от modules/proxmox-vm;
-    # правки модуля должны прогонять тот же apply, что и правки самого environment.
-    paths: ['environments/nodes/**', 'modules/**']
 
 env:
   TF_VAR_proxmox_endpoint: ${{ secrets.PROXMOX_ENDPOINT }}
