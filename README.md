@@ -21,6 +21,7 @@ this repo (see [CI/CD](#cicd) for how the two connect via a pinned tag).
 │       ├ VM 9000 golden image   │       │       ├ VM 9000 golden image (own)    │
 │       ├ prod/stage/dev nodes   │       │       ├ CT 200: minio (state backend) │
 │       └ poly-nodes (WIP)       │       │       ├ VM: ci-runner                 │
+│                                │       │       ├ VM 101: immich-node           │
 │                                │       │       └ NFS export → shared-storage   │
 └──────────────┬─────────────────┘       └──────────────┬────────────────────────┘
                │                                        │
@@ -43,11 +44,17 @@ dedicated hardware, acquired after this project started nested-only (see
 below); `.20` is still nested inside libvirt/KVM on the G750JX and stays
 that way deliberately — it's the "extra CPU/RAM for peak load" half of the
 split, while `.30` holds storage and anything that must not go down
-(MinIO, CI runner). `.30`'s HDD (a second physical disk that shipped with
-it) was wiped and handed off to a separate Windows box — it was never part
-of the Proxmox storage plan. The Zenbook runs `corosync-qnetd` and nothing
-else — no VMs, just a quorum vote so the two real nodes survive either one
-going down without a stuck-at-1-vote cluster.
+(MinIO, CI runner, immich-node). `.30`'s HDD (a second physical disk that
+shipped with it) was wiped and handed off to a separate Windows box — it
+was never part of the Proxmox storage plan. The Zenbook runs
+`corosync-qnetd` and nothing else — no VMs, just a quorum vote so the two
+real nodes survive either one going down without a stuck-at-1-vote
+cluster. Note that the QDevice arbiter needs to be reachable from `.30` for
+its vote to count — if the arbiter isn't on the LAN (e.g. travelling), it's
+reachable over Tailscale instead; see the QDevice/Tailscale entry in
+[Troubleshooting notes](#troubleshooting-notes-things-that-actually-broke)
+below for the mechanics and the chicken-and-egg gotcha it has with a
+cluster that's already lost quorum.
 
 **Physical LAN topology, one level below the diagram above:** `.30`
 (bare metal) and `.3` (a Keenetic router) both uplink independently into
@@ -109,9 +116,9 @@ Consequences of the split:
 
 ### Other environments
 
-Two more root modules live under `environments/`, both built on the same
-`modules/proxmox-vm` as `nodes/`, neither wired into `pipeline.yml` — both
-are applied manually, on demand:
+Three more root modules live under `environments/`, all built on the same
+`modules/proxmox-vm` as `nodes/`, none wired into `pipeline.yml` — all
+applied manually, on demand:
 
 - **`poly-nodes/`** — infra for a separate project,
   [`poly-ci`](https://github.com/tsuyakashi/poly-ci): runner/prod/monitoring
@@ -120,11 +127,80 @@ are applied manually, on demand:
 - **`minecraft-node/`** — a single isolated node (own NAT segment, no
   access to the rest of the LAN) running a Minecraft server + playit.gg
   tunnel. Short-lived/situational by nature, not part of the core lab.
+- **`immich-node/`** — a single VM (`.30`, `local-lvm`) running Immich via
+  plain `docker compose` (deliberately not swarm — `env_file`/`depends_on`
+  don't survive `docker stack deploy`, and the whole workload is
+  bind-mount/stateful, so swarm's node-portability doesn't apply here
+  anyway). Migrated over from an ad-hoc `docker compose` setup on a
+  non-Proxmox host after a disk-exhaustion incident there took down a
+  cluster node in the process (see the QDevice/Tailscale troubleshooting
+  entry below). Two things about this environment are worth knowing before
+  touching it, both detailed in its own
+  [`environments/immich-node/README.md`](environments/immich-node/README.md)
+  rather than duplicated here:
+  - `cpu_type = "host"` is required, not cosmetic — the default module
+    baseline (`kvm64`) lacks CPU flags (`sse4_2`/`popcnt`/`avx2`) that
+    Immich's machine-learning container needs, and it restart-loops
+    without them.
+  - The photo library lives on a physical exFAT disk passed through to the
+    VM as a raw block device (`qm set ... -scsi1 <device>,ro=1`), not a
+    Terraform-managed datastore volume — `bpg/proxmox` has no declarative
+    way to bind an existing physical device, so this goes through a
+    `null_resource` + `local-exec` workaround. See
+    [The raw-disk-passthrough pattern](#the-raw-disk-passthrough-pattern-nullresource--local-exec)
+    below for why this exists and its limits.
 
 `poly-nodes/` clones from a second golden image (VM 9001) on `hdd-storage`
 instead of the main `local-lvm` pool — that disk is currently flaky, so
 9001/`poly-nodes` is WIP and bootstrapped by hand for now (same pattern as
 `proxmox-init.sh` uses for 9000, just not yet scripted).
+
+### The raw-disk-passthrough pattern (`null_resource` + `local-exec`)
+
+Introduced for `immich-node`'s recovery disk, but general enough to note
+here rather than only in that environment's own README, since it's a
+pattern any future environment needing the same thing (an existing
+physical disk, not a Terraform-managed datastore volume) would reuse.
+
+`bpg/proxmox` only supports datastore-backed disks declaratively (the
+`disk { ... }` block). Binding an already-existing physical block device
+to a VM has no first-class resource — the only path is `qm set <vmid>
+-scsiN <device>,ro=1` run directly against the Proxmox host, wrapped here
+in a `null_resource`:
+
+```hcl
+resource "null_resource" "recovery_ro_bind" {
+  for_each = { for k, v in var.nodes : k => v if v.recovery_ro_device != null }
+
+  triggers = {
+    vm_id  = module.node[each.key].vm_id
+    device = each.value.recovery_ro_device
+  }
+
+  provisioner "local-exec" {
+    command = "ssh root@${var.proxmox_host_ip} qm set ${module.node[each.key].vm_id} -scsi1 ${each.value.recovery_ro_device},ro=1"
+  }
+
+  depends_on = [module.node]
+}
+```
+
+**Known limitations, accepted rather than solved:**
+- `triggers` only reacts to `vm_id` (VM recreated) or the device path
+  changing — a disk detached by hand outside Terraform won't be noticed or
+  restored on the next `apply`. This is drift-tolerant by omission, not
+  drift-corrected.
+- The `scsiN` index is hardcoded per environment, not derived from existing
+  disk config — adding another disk to the same VM on the same index later
+  would collide.
+- `local-exec` runs wherever `apply` runs, not on a fixed CI host — it
+  needs working SSH access to `root@<proxmox_host_ip>` from that exact
+  machine. Currently fine (applied from the same laptop that already has
+  that access for everything else); would need attention if this
+  environment's `apply` ever moved to the self-hosted runner.
+- Proxmox passes through the whole device, not the specific partition
+  requested — `/dev/sdb1` on the host shows up as raw `/dev/sdb` inside the
+  guest.
 
 ### State backend lives off both
 
@@ -198,23 +274,28 @@ cluster-wide action that only makes sense to run once, not per-node.
 - **Ansible** — post-provision configuration, delegated to
   [`swarm-lab`](../swarm-lab)'s playbook via a pinned git tag (see
   [CI/CD](#cicd) below)
+- **Docker Compose + systemd** — `immich-node`'s provisioning model,
+  deliberately not swarm (see [Other environments](#other-environments)
+  above and that environment's own README)
 
 ## Repo layout
 
 Standard `modules/` + `environments/` split. `modules/proxmox-vm` is the one
 reusable building block — a single cloned VM with a cloud-init snippet — and
 every root module (`environments/nodes`, `environments/runner`,
-`environments/poly-nodes`, `environments/minecraft-node`) calls it. The
-module owns no backend and no provider config; each environment configures
-those independently, which is what actually enforces the state/lifecycle
-separation described below (not just a folder convention).
+`environments/poly-nodes`, `environments/minecraft-node`,
+`environments/immich-node`) calls it. The module owns no backend and no
+provider config; each environment configures those independently, which is
+what actually enforces the state/lifecycle separation described below (not
+just a folder convention).
 
 ```
 modules/
 └── proxmox-vm/                       # reusable module — no backend, no provider block
     ├── main.tf                       #   VM + cloud-init file resource
-    ├── variables.tf                  #   name, sizing, ip_config (static|dhcp), ssh keys,
-    │                                 #   extra_packages/extra_runcmd/write_files/docker_group
+    ├── variables.tf                  #   name, sizing, cpu_type, ip_config (static|dhcp),
+    │                                 #   ssh keys, extra_packages/extra_runcmd/write_files/
+    │                                 #   docker_group
     ├── versions.tf                   #   required_version + required_providers
     ├── outputs.tf                    #   vm_id, ipv4_addresses
     ├── README.md
@@ -245,9 +326,14 @@ environments/
 ├── poly-nodes/                       # ROOT MODULE — infra for poly-ci, manual apply, WIP
 │   └── ...                           #   same shape as nodes/; clones from VM 9001 on
 │                                     #   hdd-storage (currently flaky — see "Other environments")
-└── minecraft-node/                   # ROOT MODULE — isolated Minecraft node, manual apply
-    ├── network.tf                    #   isolated vmbr1 bridge + NAT/DROP iptables rules
-    └── ...                           #   short-lived/situational, not part of the core lab
+├── minecraft-node/                   # ROOT MODULE — isolated Minecraft node, manual apply
+│   ├── network.tf                    #   isolated vmbr1 bridge + NAT/DROP iptables rules
+│   └── ...                           #   short-lived/situational, not part of the core lab
+└── immich-node/                      # ROOT MODULE — Immich (docker compose), manual apply
+    ├── main.tf                       #   module "node" call + null_resource for the raw
+    │                                 #   recovery-disk passthrough (see above)
+    ├── README.md                     #   cpu_type / recovery-ro details specific to this env
+    └── ...                           #   same base shape as nodes/
 
 .github/workflows/pipeline.yml        # provision (terraform, environments/nodes) + deploy (ansible)
 scripts/
@@ -292,7 +378,8 @@ scripts/
   own state during PR #23. The same `nodes/` vs `runner/` key-namespacing
   later made it straightforward to migrate `environments/runner/`'s state
   into the same bucket too — see Troubleshooting notes, and to add
-  `poly-nodes/` and `minecraft-node/` under their own keys later.
+  `poly-nodes/`, `minecraft-node/`, and `immich-node/` under their own keys
+  later.
 - Moving the VM/cloud-init resources into `modules/proxmox-vm` also meant
   they picked up new state addresses (`module.node["..."]....` instead of
   the old flat `proxmox_virtual_environment_vm.node["..."]`). Adopting this
@@ -304,11 +391,21 @@ scripts/
   in the plan, then removed.
 - `modules/proxmox-vm` gained four optional inputs — `extra_packages`,
   `extra_runcmd`, `write_files`, `docker_group` — so environment-specific
-  provisioning (currently only the runner and minecraft-node need any of
-  this) stays out of the shared base template. `environments/nodes` never
-  sets these, so node VMs are unaffected; see
+  provisioning (currently the runner, minecraft-node, and immich-node use
+  some subset of this) stays out of the shared base template.
+  `environments/nodes` never sets these, so node VMs are unaffected; see
   [Runner host prerequisites](#runner-host-prerequisites-automated-via-cloud-init)
   below for how the runner uses them.
+- `modules/proxmox-vm` gained a fifth optional input, `cpu_type` (default
+  `kvm64`, the same conservative baseline the module always used
+  implicitly before this was exposed). Added for `immich-node`, which
+  needs `cpu_type = "host"` — the default baseline lacks CPU flags
+  (`sse4_2`/`popcnt`/`avx2`) that Immich's machine-learning container
+  requires, and it restart-loops without them. Every other environment
+  keeps the old implicit default unchanged; only `immich-node` sets this
+  explicitly. See that environment's own README for the full story, and
+  the CPU-type entry in Troubleshooting notes below for the general
+  lesson.
 - Both VM resources gained an explicit `serial_device`/`vga` block (matching
   what the golden image already had), so `qm terminal <vmid>` now shows a
   real console instead of a blank screen — closes a long-standing diagnosis
@@ -337,6 +434,11 @@ scripts/
   see the corresponding Troubleshooting notes entry. Harmless no-op on
   `minecraft-node` (isolated `vmbr1` segment has no route to `.3`; the
   command is wrapped so a failure there doesn't block the rest of `runcmd`).
+- `environments/immich-node` added — Immich via `docker compose`, own root
+  module, own state key. Introduced the raw-disk-passthrough pattern (see
+  [above](#the-raw-disk-passthrough-pattern-nullresource--local-exec)) and
+  the `cpu_type` module input. Not wired into `pipeline.yml`, same as
+  `poly-nodes`/`minecraft-node`.
 
 ## Quickstart
 
@@ -461,7 +563,7 @@ Troubleshooting notes:
 pvecm add <first-node-ip> --link0 <this-node-ip>
 ```
 
-Then, for a 2-node cluster (kforum quorum survives either node going down,
+Then, for a 2-node cluster (quorum survives either node going down,
 not just neither), set up a QDevice arbiter on a third always-on-ish
 machine that doesn't need to run guests:
 
@@ -477,7 +579,13 @@ pvecm qdevice setup <arbiter-ip>
 `pvecm qdevice setup` needs root SSH into the arbiter — see Troubleshooting
 notes for the SSH-key/`PermitRootLogin` dance this requires on a normal
 desktop/laptop that doesn't allow root login by default, and for why it's
-safe (and worth it) to revert `PermitRootLogin` back afterward.
+safe (and worth it) to revert `PermitRootLogin` back afterward. If the
+arbiter is only reachable over Tailscale at the time (e.g. it's traveling,
+not on the LAN) — see the QDevice/Tailscale entry in Troubleshooting notes
+for the extra step this needs (the node running `qdevice setup` must itself
+be a tailnet member) and the chicken-and-egg gotcha (`qdevice remove`/
+`setup` both refuse to run with any cluster node offline, so recovering
+quorum on the *other* node has to happen first).
 
 ### 6. (Optional) Register cluster-wide shared storage (`.30`)
 
@@ -525,14 +633,19 @@ same MinIO bucket as the nodes' state, under a separate `runner/` key — see
 Troubleshooting notes for why a local backend here turned out to still be a
 single point of failure (laptop loss, not just Proxmox loss).
 
-### 9. (Optional, manual, as-needed) poly-nodes / minecraft-node
+### 9. (Optional, manual, as-needed) poly-nodes / minecraft-node / immich-node
 
-Same pattern as steps 7/8 — `cd` into `environments/poly-nodes/` or
-`environments/minecraft-node/`, copy the `.tfvars.example`, `terraform init`,
-`terraform apply`. Neither is wired into `pipeline.yml`; both are meant to
-be stood up, used, and torn down on demand rather than staying live like
-`nodes/`. See [Other environments](#other-environments) above for what each
-one is.
+Same pattern as steps 7/8 — `cd` into `environments/poly-nodes/`,
+`environments/minecraft-node/`, or `environments/immich-node/`, copy the
+`.tfvars.example`, `terraform init`, `terraform apply`. None are wired into
+`pipeline.yml`; `poly-nodes`/`minecraft-node` are meant to be stood up,
+used, and torn down on demand rather than staying live like `nodes/`,
+while `immich-node` is a persistent single VM (like `runner/`) that just
+happens to be applied manually rather than from CI. See
+[Other environments](#other-environments) above for what each one is.
+`immich-node` also needs a short manual pass after the first `apply` — see
+that environment's own README for the recovery-disk mount and
+`docker compose` setup steps not covered by Terraform.
 
 ### Runner host prerequisites (automated via cloud-init)
 
@@ -613,11 +726,12 @@ triggered on `workflow_dispatch` or a push to `main` touching
 `environments/nodes` depends on `modules/proxmox-vm` — a module change
 needs the same `apply` as an environment change; see
 [Architecture](#two-independent-root-modules-on-purpose)). Pushes under
-`environments/runner/**`, `environments/poly-nodes/**`, and
-`environments/minecraft-node/**` deliberately do **not** trigger this
-workflow — the runner is applied by hand, never from its own CI job, and
-`poly-nodes`/`minecraft-node` are spin-up/tear-down environments, not
-persistent infra like `nodes/`.
+`environments/runner/**`, `environments/poly-nodes/**`,
+`environments/minecraft-node/**`, and `environments/immich-node/**`
+deliberately do **not** trigger this workflow — the runner is applied by
+hand, never from its own CI job, and `poly-nodes`/`minecraft-node`/
+`immich-node` are all manually-applied environments, not persistent
+CI-managed infra like `nodes/`.
 
 1. **provision** — `terraform apply` against the `environments/nodes` root
    module, producing `environments/nodes/inventory.ini` via the `local_file`
@@ -673,6 +787,12 @@ privileges above); QEMU HMP monitor access, if ever needed, now goes through
 instead, and guest-agent-specific access has its own new
 `VM.GuestAgent.*` privileges. See the role-table diff in the git history
 for exactly what was dropped.
+
+Note that `qm set -scsiN <device>,ro=1` (used by `immich-node`'s raw-disk
+passthrough — see [above](#the-raw-disk-passthrough-pattern-nullresource--local-exec))
+runs as `root` over plain SSH, not through the Terraform provider's API
+token — so it isn't bound by `TerraformProv`'s privilege list at all, and
+doesn't need any addition to the table above.
 
 ## Troubleshooting notes (things that actually broke)
 
@@ -785,6 +905,56 @@ for exactly what was dropped.
   `pvesm status` / `lvs pve` should be the first thing checked on any
   simultaneous multi-VM `io-error`, ahead of anything guest-side.
 
+- **A guest-side disk fill (not the hypervisor's thin pool) paused a
+  nested VM instead of crashing it, which looked like a crash at first.**
+  A `docker compose` workload (Immich, pre-`immich-node`, running directly
+  on a physical Ubuntu host, not a Proxmox guest) filled that host's own
+  disk overnight; a *separate* nested Proxmox VM (`pve-rog`) whose qcow2
+  disk image lived on that same physical disk got paused by
+  libvirt/QEMU (not crashed) once the underlying filesystem had no space
+  left — `virsh list --all` showed it as `paused`, not `shut off`, and
+  `virsh resume proxmox-lab` brought it straight back with no data loss or
+  corosync resync needed. This cascaded into a real quorum loss on
+  `lab-cluster` (the paused node's vote dropped out, leaving `Expected
+  votes: 2` / `Total votes: 1` on the remaining node — `pvecm status`
+  reported `Quorate: No`) — recovering the paused VM was the actual fix,
+  not anything cluster-config-side. Two lessons: (1) `paused`, not
+  `shut off` or absent from `virsh list --all`, is the first thing to check
+  when a guest is unexpectedly unreachable after a disk-full event nearby
+  — `virsh resume` is a much smaller hammer than assuming a rebuild is
+  needed; (2) this is the incident that motivated moving the Immich
+  workload onto its own dedicated, Proxmox-managed VM
+  (`environments/immich-node`) instead of a physical host's local disk
+  shared with unrelated guests — see
+  [Other environments](#other-environments) above.
+
+- **Recovering a lost QDevice arbiter mid-cluster required the arbiter to
+  join the tailnet, and `qdevice remove`/`setup` both refuse to run with
+  any node offline — a real chicken-and-egg.** With the QDevice arbiter
+  (normally on the LAN) reachable only over Tailscale at the time (away
+  from home), and one cluster node down for unrelated reasons (paused, see
+  the entry above), `pvecm qdevice remove` failed outright with
+  `All nodes must be online! Node <name> is offline, aborting` —
+  re-registering the arbiter's new address is *cluster-wide* config, so
+  Proxmox refuses to touch it while any member is unreachable. The
+  paused-VM fix above had to land first, purely by coincidence of both
+  problems existing at once; if the paused VM had instead been the one
+  needed to reach the arbiter, this would've been unrecoverable without
+  fixing that first regardless. Once quorum was back: `ssh
+  <tailscale-ip-of-arbiter>` from the bare-metal node failed outright
+  (`100% packet loss`) until that node *itself* joined the tailnet — a
+  subnet-router advertising the LAN range from a different machine doesn't
+  help here, since the arbiter needs to be dialed *from* the Proxmox host
+  for `qdevice setup`'s SSH step, not the other way around.
+  `tailscale up` accepting `--accept-routes=false` by default was correct
+  to leave alone — the bare-metal node already sits natively on the LAN
+  range some other tailnet member was also advertising, and accepting that
+  route in addition would just create a second, less predictable path to
+  the same subnet. Once the Proxmox host had its own tailnet identity,
+  `pvecm qdevice setup <tailscale-ip> --force` worked normally — the
+  `--force` was needed only because stale cert/config state from the
+  arbiter's previous LAN-based registration was still present.
+
 - **Concurrent full-clones on the nested node are unreliable.**
   `terraform apply` with default parallelism clones all node VMs at once;
   on the nested single-disk setup that meant heavy I/O contention — one
@@ -828,8 +998,8 @@ for exactly what was dropped.
   Terraform `for` loop but zero items produces a bare `packages:` key with
   nothing under it, which YAML reads as `null`, not an empty list — cloud-init's
   schema requires an array. This affects any VM with `extra_packages = []`
-  (i.e. every node, since only the runner and minecraft-node set packages).
-  Fixed by wrapping the whole `packages:` block in
+  (i.e. every node, since only the runner, minecraft-node, and immich-node
+  set packages). Fixed by wrapping the whole `packages:` block in
   `%{ if length(extra_packages) > 0 ~}`, so the key is omitted entirely
   rather than emitted empty.
 
@@ -863,6 +1033,31 @@ for exactly what was dropped.
   binary (141 bytes, `file` reports `HTML document`), and the resulting
   "binary" fails with a bash parse error when executed. Fixed by switching
   to the current path, `https://dl.min.io/aistor/mc/release/linux-amd64/mc`.
+
+- **Default `kvm64` CPU baseline silently breaks workloads compiled against
+  a newer instruction-set floor.** `modules/proxmox-vm` never explicitly
+  set `cpu.type` until `immich-node` needed it — meaning every VM had
+  implicitly been running `kvm64` (Proxmox's own default), a baseline
+  narrow enough to exclude `sse4_2`/`popcnt`/`avx2`. This went unnoticed
+  until Immich's machine-learning container (numpy/onnxruntime, built
+  against x86-64-v2) hit it and restart-looped with
+  `RuntimeError: NumPy was built with baseline optimizations: (X86_V2)
+  but your machine doesn't support`. Confirmed via
+  `cat /proc/cpuinfo | grep flags` inside the guest — genuinely absent, not
+  just unreported. Fixed by exposing `cpu_type` as a module input
+  (`modules/proxmox-vm/variables.tf`, still defaulting to `kvm64` for every
+  existing environment) and setting it to `host` specifically for
+  `immich-node`, which never migrates between hosts by design (bind-mounts
+  to a specific physical disk — see
+  [immich-node's README](environments/immich-node/README.md)), so the
+  usual migration-portability argument for a conservative baseline doesn't
+  apply there. **Not hot-pluggable** — a VM already running needs an
+  explicit `qm stop && qm start` (not a guest-side `reboot`) before a
+  changed `cpu.type` actually takes effect; `terraform apply` alone
+  rewrites the config but doesn't force this. Worth checking `cpu.type` on
+  any future VM whose workload turns out to depend on specific CPU
+  features (AES-NI, AVX, etc.) — the default here has always been the
+  conservative one, and it's opt-in per environment, not automatic.
 
 - **Node VMs (and, before the serial console fix, the runner) had no usable
   serial console.** The Terraform-managed VM resources didn't set an
@@ -1173,7 +1368,8 @@ for exactly what was dropped.
 - [x] Two-node Proxmox cluster (`lab-cluster`) — one nested (`.20`, peak
       CPU/RAM), one bare metal (`.30`, must-have services + storage) —
       plus a QDevice arbiter on the Zenbook, so quorum survives either
-      cluster node going down
+      cluster node going down, including over Tailscale when the arbiter
+      isn't on the LAN
 - [x] `bpg/proxmox` provider authenticated (API token + SSH key) against
       the cluster
 - [x] Golden image template (cloud-init–ready Ubuntu 24.04), present on
@@ -1234,6 +1430,15 @@ for exactly what was dropped.
       on a currently-flaky HDD (`hdd-storage`) — verified working when
       pointed at SSD storage instead, so this is WIP pending a decision on
       that disk.
+- [x] `environments/immich-node` added — Immich via `docker compose` on a
+      dedicated `.30` VM, replacing a physical-host `docker compose`
+      deployment whose disk exhaustion had previously paused an unrelated
+      nested cluster node (see Troubleshooting notes). Introduced the
+      `cpu_type` module input (needed here as `host`, for ML-container CPU
+      flag requirements) and the raw-disk-passthrough pattern
+      (`null_resource` + `local-exec`) for the recovery-disk bind. Not
+      wired into `pipeline.yml`, applied manually like `poly-nodes`/
+      `minecraft-node`.
 - [x] Dedicated hardware acquired and joined the cluster (`.30`) — no
       longer fully nested-only, though `.20` stays nested by choice (see
       Architecture above)
@@ -1244,15 +1449,26 @@ for exactly what was dropped.
       environment via a wake-ping in the shared base cloud-init `runcmd`,
       instead of relying on a manual `ssh -J bare-proxmox` after each
       provision.
-- [ ] Migrate MinIO (CT 200) and the CI runner onto `.30` specifically
+- [x] Migrate MinIO (CT 200) and the CI runner onto `.30` specifically
       (currently redeployed fresh post-cluster rather than moved; the
       state/backend split above already makes this safe to do whenever)
-- [ ] `proxmox-init.sh`'s golden-image/role setup fully re-verified on
-      both cluster nodes post-9.2 (role privileges fixed — see the
-      `TerraformProv` table — golden image confirmed present on both)
+- [x] `TerraformProv` role/ACLs live in `/etc/pve` (pmxcfs), which
+      replicates cluster-wide via corosync — there's no per-node role
+      state to "re-verify" separately; a single check against either
+      node confirms both. Superseded the earlier phrasing of this as a
+      per-node task.
 - [ ] Vault (or similar) for the secrets currently living as plaintext on
       disk (`/root/terraform-token.json`, cloud-init snippets) — noted as
       an acceptable trade-off for now, not yet addressed
+- [x] `immich-node`'s recovery-disk bind is now Terraform-managed
+      (`null_resource` + `local-exec` running `qm set -scsiN`, applied
+      automatically on `terraform apply` — see
+      [the raw-disk-passthrough pattern](#the-raw-disk-passthrough-pattern-nullresource--local-exec)
+      above). What remains manual, and will stay that way (guest-OS-level
+      config, not something Terraform can reach): installing `exfat-fuse`,
+      mounting the disk inside the guest, the `mnt-recovery-ro.mount`/
+      `immich.service` systemd units, and the initial data `rsync` — see
+      `environments/immich-node/README.md`.
 - [x] `swarm-lab`'s `Vagrantfile` stays — deliberately kept so `swarm-lab`
       remains a fully independent, self-contained project that can be spun
       up on its own hardware without this repo. This repo is a separate,
