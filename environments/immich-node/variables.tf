@@ -53,7 +53,7 @@ variable "nodes" {
       tag_name           = "immich",
       memory             = 4096,
       cores              = 4,
-      disk_size          = 70,
+      disk_size          = 100,
       ip                 = "192.168.100.60/24"
       cpu_type           = "host",
       recovery_ro_device = "/dev/sdb1"
