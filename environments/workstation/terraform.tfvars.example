@@ -1,0 +1,6 @@
+proxmox_endpoint  = "https://192.168.100.20:8006/"
+proxmox_api_token = "terraform@pve!provider-token="
+
+# installer_usb_device ("/dev/sdb" по умолчанию — см. variables.tf) уже
+# зашит в default var.nodes, менять/оверрайдить его тут не нужно, если
+# путь на хосте не другой.
