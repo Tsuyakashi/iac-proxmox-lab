@@ -26,27 +26,26 @@ variable "network_bridge" {
 variable "nodes" {
   description = <<-EOT
     Desktop VM topology. Одна запись сейчас (Ubuntu Desktop, установка с
-    физической флешки через scsi1-passthrough, virtio-gl вместо GPU
-    passthrough — Kepler reset bug без софтового фикса + драйвер 470.xxx
-    официально EOL, см. обсуждение в чате). Вторая запись (Windows-
-    десктоп, своя флешка, та же virtio-gl-схема, свои usb_devices)
-    добавится сюда же позже — карта, а не одиночный ресурс, специально
-    под это: обе VM смогут жить параллельно, каждая со своим виртуальным
-    дисплеем, без конкуренции за физическую GPU.
+    ISO через виртуальный cdrom, virtio-gl вместо GPU passthrough — Kepler
+    reset bug без софтового фикса + драйвер 470.xxx официально EOL, см.
+    обсуждение в чате). Вторая запись (Windows-десктоп, свой ISO, та же
+    virtio-gl-схема, свои usb_devices) добавится сюда же позже — карта, а
+    не одиночный ресурс, специально под это: обе VM смогут жить
+    параллельно, каждая со своим виртуальным дисплеем, без конкуренции за
+    физическую GPU.
 
-    installer_usb_device — путь к устройству флешки НА ХОСТЕ (pve-rog),
-                           не в госте, например "/dev/sdb". Пробрасывается
-                           целиком (не /dev/sdb1 — Proxmox отдаёт
-                           устройство целиком, разделы не пробрасывает
-                           отдельно, см. immich-node README "Known
-                           limitations"). null = не пробрасывать
-                           (для будущей VM, у которой ещё нет флешки).
-    boot_from_installer  — true, пока VM не установлена (грузится с
-                           флешки первым в порядке). Переключи на false и
-                           сделай re-apply после того, как Ubuntu реально
-                           стоит на scsi0 — иначе случайный ребут снова
-                           закинет тебя в установщик. Игнорируется, если
-                           installer_usb_device = null.
+    iso_file_id  — ID ISO-образа в датасторе, формат
+                  "<datastore>:iso/<файл>", например
+                  "local:iso/ubuntu-26.04-desktop-amd64.iso". Образ
+                  должен уже лежать в датасторе ДО apply — Terraform его
+                  не качает и не заливает сам (scp/rsync в
+                  /var/lib/vz/template/iso/ на хосте, или через веб-UI).
+                  null = не подключать cdrom вообще.
+    boot_from_iso — true, пока VM не установлена (грузится с ISO первым в
+                  порядке). Переключи на false и сделай re-apply после
+                  того, как Ubuntu реально стоит на scsi0 — иначе
+                  случайный ребут снова закинет тебя в установщик.
+                  Игнорируется, если iso_file_id = null.
     vga_type   — "virtio-gl" даёт частичное 3D-ускорение через host GPU
                 (Venus/virgl, через встроенный i915 на pve-rog, не через
                 770M) — достаточно для 2D/казуальных игр.
@@ -58,11 +57,9 @@ variable "nodes" {
                 "vendorid:productid" (смотреть через `ssh pve-rog
                 lsusb`), например ["046d:c52b", "046d:0843"] под
                 клавиатуру/мышь/веб-камеру. Обычный HID/UVC passthrough,
-                никак не связан с флешкой-инсталлятором выше (та —
-                блочное устройство, отдельный механизм) и никак не
-                связан с GPU reset bug (тот — только про видеовыходы).
-                Пустой список по умолчанию — ничего не пробрасывается,
-                пока явно не перечислишь устройства.
+                никак не связан с GPU reset bug (тот — только про
+                видеовыходы). Пустой список по умолчанию — ничего не
+                пробрасывается, пока явно не перечислишь устройства.
   EOT
   type = map(object({
     tag_name = string
@@ -70,32 +67,31 @@ variable "nodes" {
     cores    = number
     mac      = string
 
-    proxmox_node         = optional(string)
-    datastore_id_disk    = optional(string, "local-lvm")
-    disk_size            = optional(number, 64)
-    vga_type             = optional(string, "virtio-gl")
-    vga_memory           = optional(number, 64)
-    installer_usb_device = optional(string, null)
-    boot_from_installer  = optional(bool, true)
-    usb_devices          = optional(list(string), [])
+    proxmox_node      = optional(string)
+    datastore_id_disk = optional(string, "local-lvm")
+    disk_size         = optional(number, 64)
+    vga_type          = optional(string, "virtio-gl")
+    vga_memory        = optional(number, 64)
+    iso_file_id       = optional(string, null)
+    boot_from_iso     = optional(bool, true)
+    usb_devices       = optional(list(string), [])
   }))
   default = {
     # usb_devices — по lsusb на pve-rog: webcam (13d3:5188), клавиатура
     # (0c45:5004), мышь (1532:0085). Осознанно НЕ включены:
     #   - bluetooth-адаптер (13d3:3362) — трогать не нужно, если он не
     #     используется гостем напрямую; штатно остаётся на хосте.
-    #   - "USB Disk 2.0" (346d:5678) — это и есть флешка-инсталлятор,
-    #     она уже пробрасывается отдельно через installer_usb_device
-    #     (блочное устройство, scsi1), добавлять её же в usb_devices
-    #     нельзя — это два разных механизма проброса одного и того же
-    #     физического устройства, будет конфликт.
+    #   - "USB Disk 2.0" (346d:5678) — физическая флешка, от неё
+    #     отказались как от способа установки (SeaBIOS не смог с неё
+    #     забутиться через scsi1 passthrough), теперь установка идёт
+    #     через iso_file_id ниже, флешка вообще не используется.
     "ubuntu-workstation" = {
-      tag_name             = "workstation",
-      memory               = 8192,
-      cores                = 4,
-      mac                  = "BC:24:11:9A:2C:71",
-      installer_usb_device = "/dev/sdb",
-      usb_devices          = ["13d3:5188", "0c45:5004", "1532:0085"]
+      tag_name    = "workstation",
+      memory      = 8192,
+      cores       = 4,
+      mac         = "BC:24:11:9A:2C:71",
+      iso_file_id = "local:iso/ubuntu-26.04-desktop-amd64.iso",
+      usb_devices = ["13d3:5188", "0c45:5004", "1532:0085", "08bb:2902", "046d:0825"]
     }
   }
 }
