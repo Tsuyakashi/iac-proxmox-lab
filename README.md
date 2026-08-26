@@ -20,9 +20,9 @@ this repo (see [CI/CD](#cicd) for how the two connect via a pinned tag).
 │  └── vmbr0 ─────────┐          │       │  └── vmbr0 ─────────┐                 │
 │       ├ VM 9000 golden image   │       │       ├ VM 9000 golden image (own)    │
 │       ├ prod/stage/dev nodes   │       │       ├ CT 200: minio (state backend) │
-│       └ poly-nodes (WIP)       │       │       ├ VM: ci-runner                 │
-│                                │       │       ├ VM 101: immich-node           │
-│                                │       │       └ NFS export → shared-storage   │
+│       ├ poly-nodes (WIP)       │       │       ├ VM: ci-runner                 │
+│       └ VM 100: workstation    │       │       ├ VM 101: immich-node           │
+│         (GUI-installed desktop)│       │       └ NFS export → shared-storage   │
 └──────────────┬─────────────────┘       └──────────────┬────────────────────────┘
                │                                        │
                └──────────────── corosync/knet ─────────┘
@@ -55,6 +55,17 @@ reachable over Tailscale instead; see the QDevice/Tailscale entry in
 [Troubleshooting notes](#troubleshooting-notes-things-that-actually-broke)
 below for the mechanics and the chicken-and-egg gotcha it has with a
 cluster that's already lost quorum.
+
+`.20` also hosts `workstation` — a GUI-installed Ubuntu Desktop VM used as
+an actual personal computer (external monitors/keyboard/mouse/webcam
+plugged into the physical laptop, passed through to the VM), with the host
+itself running as a local SPICE kiosk so no other machine is needed to
+view it. This is architecturally unrelated to the nested-Proxmox role
+`.20` already plays — it's just another guest on the same node — but
+worth calling out since it's the one VM in this lab not built from the
+golden image / cloud-init pipeline. See
+[Other environments](#other-environments) below and its own
+[`environments/workstation/README.md`](environments/workstation/README.md).
 
 **Physical LAN topology, one level below the diagram above:** `.30`
 (bare metal) and `.3` (a Keenetic router) both uplink independently into
@@ -116,9 +127,9 @@ Consequences of the split:
 
 ### Other environments
 
-Three more root modules live under `environments/`, all built on the same
-`modules/proxmox-vm` as `nodes/`, none wired into `pipeline.yml` — all
-applied manually, on demand:
+Four more root modules live under `environments/`, all built on the same
+`modules/proxmox-vm` as `nodes/` (except `workstation/`, see below), none
+wired into `pipeline.yml` — all applied manually, on demand:
 
 - **`poly-nodes/`** — infra for a separate project,
   [`poly-ci`](https://github.com/tsuyakashi/poly-ci): runner/prod/monitoring
@@ -149,6 +160,32 @@ applied manually, on demand:
     `null_resource` + `local-exec` workaround. See
     [The raw-disk-passthrough pattern](#the-raw-disk-passthrough-pattern-nullresource--local-exec)
     below for why this exists and its limits.
+- **`workstation/`** — a GUI-installed Ubuntu Desktop VM(s) on `pve-rog`
+  (`.20`), used as an actual personal computer rather than a headless
+  service. Structurally different from every other environment: **not**
+  built on `modules/proxmox-vm` at all — that module is built entirely
+  around `clone{}` from the golden image plus cloud-init user-data, which
+  doesn't fit "install Ubuntu Desktop by hand through the GUI installer".
+  Instead it's a standalone `proxmox_virtual_environment_vm` resource that
+  Terraform only uses to wire up the VM's hardware (disk, network, vga,
+  virtual cdrom with an ISO, USB peripherals, audio) — the OS install
+  itself happens by hand, through the SPICE console, like on real
+  hardware. GPU passthrough was deliberately rejected (Kepler VFIO reset
+  bug with no software fix, plus the 470.xxx driver branch being
+  officially EOL) in favor of paravirtualized video (`vga_type = "qxl2"`,
+  chosen specifically for its two-head SPICE support — `virtio-gl` was
+  tried first and rejected for being single-head-only in Proxmox's QEMU
+  build). Real USB peripherals (keyboard/mouse/webcam) hit the same
+  "only root can set real-device config" API restriction as the raw-disk
+  pattern above, so they're bound the same way (`null_resource` +
+  `local-exec` running `qm set -scsiN`/`-usbN` over SSH). The host itself
+  runs as a local SPICE kiosk (`scripts/desktop-kiosk-setup.sh`) so the VM
+  displays directly on the laptop's own external monitors, with no other
+  machine needed to view it. Full detail — the ISO-vs-raw-flash-drive boot
+  story, the `qxl2` vs `virtio-gl` vs passthrough decision, the kiosk
+  script's `pvesh`/sudoers/DPMS mechanics — is in its own
+  [`environments/workstation/README.md`](environments/workstation/README.md)
+  rather than duplicated here.
 
 `poly-nodes/` clones from a second golden image (VM 9001) on `hdd-storage`
 instead of the main `local-lvm` pool — that disk is currently flaky, so
@@ -160,7 +197,12 @@ instead of the main `local-lvm` pool — that disk is currently flaky, so
 Introduced for `immich-node`'s recovery disk, but general enough to note
 here rather than only in that environment's own README, since it's a
 pattern any future environment needing the same thing (an existing
-physical disk, not a Terraform-managed datastore volume) would reuse.
+physical disk, not a Terraform-managed datastore volume) would reuse. The
+same underlying restriction — the Proxmox API rejecting non-root access to
+"real device" config — also applies to USB passthrough (`usbN`, used by
+`environments/workstation` for its keyboard/mouse/webcam), and is worked
+around with the identical `null_resource` + SSH pattern; see that
+environment's own README for the USB-specific version.
 
 `bpg/proxmox` only supports datastore-backed disks declaratively (the
 `disk { ... }` block). Binding an already-existing physical block device
@@ -201,6 +243,10 @@ resource "null_resource" "recovery_ro_bind" {
 - Proxmox passes through the whole device, not the specific partition
   requested — `/dev/sdb1` on the host shows up as raw `/dev/sdb` inside the
   guest.
+- The USB variant (`environments/workstation`) adds one more wrinkle:
+  `usb_devices` is a positional `list(string)`, not keyed by device — see
+  that environment's own README for what happens to `null_resource`
+  indices when the list is edited in the middle.
 
 ### State backend lives off both
 
@@ -266,6 +312,8 @@ cluster-wide action that only makes sense to run once, not per-node.
   provider (chosen over `Telmate/proxmox` — more actively maintained, fuller
   API coverage)
 - **cloud-init** — VM bootstrapping (user creation, SSH keys, package install)
+  for every environment except `workstation/`, which is installed by hand
+  through the GUI installer instead (see [Other environments](#other-environments))
 - **Ubuntu 24.04 (Noble) cloud image** — golden template, cloned per VM
 - **MinIO** (LXC, systemd daemon, no Docker) — S3-compatible Terraform state
   backend for both root modules, independent of the runner and the node
@@ -277,17 +325,20 @@ cluster-wide action that only makes sense to run once, not per-node.
 - **Docker Compose + systemd** — `immich-node`'s provisioning model,
   deliberately not swarm (see [Other environments](#other-environments)
   above and that environment's own README)
+- **SPICE (`qxl2`) + a local kiosk session** — `workstation/`'s display
+  model: paravirtualized two-head video plus a minimal X/openbox kiosk
+  running on the Proxmox host itself, so the VM shows up directly on
+  physical monitors without a separate viewing machine (see that
+  environment's own README)
 
 ## Repo layout
 
 Standard `modules/` + `environments/` split. `modules/proxmox-vm` is the one
 reusable building block — a single cloned VM with a cloud-init snippet — and
-every root module (`environments/nodes`, `environments/runner`,
-`environments/poly-nodes`, `environments/minecraft-node`,
-`environments/immich-node`) calls it. The module owns no backend and no
-provider config; each environment configures those independently, which is
-what actually enforces the state/lifecycle separation described below (not
-just a folder convention).
+every root module except `environments/workstation` (see below) calls it.
+The module owns no backend and no provider config; each environment
+configures those independently, which is what actually enforces the
+state/lifecycle separation described below (not just a folder convention).
 
 ```
 modules/
@@ -329,11 +380,20 @@ environments/
 ├── minecraft-node/                   # ROOT MODULE — isolated Minecraft node, manual apply
 │   ├── network.tf                    #   isolated vmbr1 bridge + NAT/DROP iptables rules
 │   └── ...                           #   short-lived/situational, not part of the core lab
-└── immich-node/                      # ROOT MODULE — Immich (docker compose), manual apply
-    ├── main.tf                       #   module "node" call + null_resource for the raw
-    │                                 #   recovery-disk passthrough (see above)
-    ├── README.md                     #   cpu_type / recovery-ro details specific to this env
-    └── ...                           #   same base shape as nodes/
+├── immich-node/                      # ROOT MODULE — Immich (docker compose), manual apply
+│   ├── main.tf                       #   module "node" call + null_resource for the raw
+│   │                                 #   recovery-disk passthrough (see above)
+│   ├── README.md                     #   cpu_type / recovery-ro details specific to this env
+│   └── ...                           #   same base shape as nodes/
+└── workstation/                      # ROOT MODULE — GUI-installed desktop VM(s), manual apply
+    ├── main.tf                       #   standalone proxmox_virtual_environment_vm (no
+    │                                 #   modules/proxmox-vm, no clone{}/cloud-init) + a
+    │                                 #   null_resource per USB device (same pattern as
+    │                                 #   immich-node's raw-disk bind, see above)
+    ├── README.md                     #   qxl2 vs virtio-gl vs GPU passthrough, ISO-vs-flash-
+    │                                 #   drive boot story, kiosk script mechanics
+    └── ...                           #   own backend/state; ISO must already be uploaded to
+                                      #   the datastore before apply, Terraform doesn't fetch it
 
 .github/workflows/pipeline.yml        # provision (terraform, environments/nodes) + deploy (ansible)
 scripts/
@@ -345,8 +405,13 @@ scripts/
 │                                     #   golden image, thin-pool autoextend threshold
 ├── minio-lxc-init.sh                 # Proxmox-side (.30): MinIO LXC (state backend), NOT
 │                                     #   terraform-managed, statically-addressed
-└── shared-storage-creation.sh        # Proxmox-side (.30): NFS export prep for the cluster-wide
-                                      #   shared-storage datastore (see Architecture above)
+├── shared-storage-creation.sh        # Proxmox-side (.30): NFS export prep for the cluster-wide
+│                                     #   shared-storage datastore (see Architecture above)
+└── desktop-kiosk-setup.sh            # Proxmox-side (.20/pve-rog, for environments/workstation):
+                                      #   turns the host itself into a local SPICE kiosk
+                                      #   (minimal X/openbox, autologin, remote-viewer loop) so
+                                      #   the desktop VM displays on the laptop's own external
+                                      #   monitors — see that environment's own README
 ```
 
 **What changed vs. the original flat layout**, and why:
@@ -378,8 +443,8 @@ scripts/
   own state during PR #23. The same `nodes/` vs `runner/` key-namespacing
   later made it straightforward to migrate `environments/runner/`'s state
   into the same bucket too — see Troubleshooting notes, and to add
-  `poly-nodes/`, `minecraft-node/`, and `immich-node/` under their own keys
-  later.
+  `poly-nodes/`, `minecraft-node/`, `immich-node/`, and `workstation/`
+  under their own keys later.
 - Moving the VM/cloud-init resources into `modules/proxmox-vm` also meant
   they picked up new state addresses (`module.node["..."]....` instead of
   the old flat `proxmox_virtual_environment_vm.node["..."]`). Adopting this
@@ -439,6 +504,15 @@ scripts/
   [above](#the-raw-disk-passthrough-pattern-nullresource--local-exec)) and
   the `cpu_type` module input. Not wired into `pipeline.yml`, same as
   `poly-nodes`/`minecraft-node`.
+- `environments/workstation` added — a GUI-installed Ubuntu Desktop VM on
+  `pve-rog`, own root module, own state key, deliberately **not** built on
+  `modules/proxmox-vm` (see [Other environments](#other-environments)
+  above). Reuses the raw-passthrough `null_resource` + SSH pattern for
+  real USB devices (same root cause as the raw-disk pattern — the Proxmox
+  API's "only root can set real-device config" restriction), and adds
+  `scripts/desktop-kiosk-setup.sh` for turning the host itself into a
+  local SPICE client. Not wired into `pipeline.yml`, applied manually like
+  `poly-nodes`/`minecraft-node`/`immich-node`.
 
 ## Quickstart
 
@@ -633,19 +707,27 @@ same MinIO bucket as the nodes' state, under a separate `runner/` key — see
 Troubleshooting notes for why a local backend here turned out to still be a
 single point of failure (laptop loss, not just Proxmox loss).
 
-### 9. (Optional, manual, as-needed) poly-nodes / minecraft-node / immich-node
+### 9. (Optional, manual, as-needed) poly-nodes / minecraft-node / immich-node / workstation
 
 Same pattern as steps 7/8 — `cd` into `environments/poly-nodes/`,
-`environments/minecraft-node/`, or `environments/immich-node/`, copy the
-`.tfvars.example`, `terraform init`, `terraform apply`. None are wired into
-`pipeline.yml`; `poly-nodes`/`minecraft-node` are meant to be stood up,
-used, and torn down on demand rather than staying live like `nodes/`,
-while `immich-node` is a persistent single VM (like `runner/`) that just
-happens to be applied manually rather than from CI. See
+`environments/minecraft-node/`, `environments/immich-node/`, or
+`environments/workstation/`, copy the `.tfvars.example`, `terraform init`,
+`terraform apply`. None are wired into `pipeline.yml`; `poly-nodes`/
+`minecraft-node` are meant to be stood up, used, and torn down on demand
+rather than staying live like `nodes/`, while `immich-node` and
+`workstation` are persistent single VMs (like `runner/`) that just happen
+to be applied manually rather than from CI. See
 [Other environments](#other-environments) above for what each one is.
 `immich-node` also needs a short manual pass after the first `apply` — see
 that environment's own README for the recovery-disk mount and
-`docker compose` setup steps not covered by Terraform.
+`docker compose` setup steps not covered by Terraform. `workstation` needs
+an ISO already uploaded to the target datastore *before* the first
+`apply` (Terraform doesn't fetch it), and a full manual OS install through
+the SPICE console afterward — see
+[`environments/workstation/README.md`](environments/workstation/README.md)
+for the complete sequence, including the host-side kiosk setup
+(`scripts/desktop-kiosk-setup.sh`) needed to actually view it on physical
+monitors.
 
 ### Runner host prerequisites (automated via cloud-init)
 
@@ -727,11 +809,12 @@ triggered on `workflow_dispatch` or a push to `main` touching
 needs the same `apply` as an environment change; see
 [Architecture](#two-independent-root-modules-on-purpose)). Pushes under
 `environments/runner/**`, `environments/poly-nodes/**`,
-`environments/minecraft-node/**`, and `environments/immich-node/**`
-deliberately do **not** trigger this workflow — the runner is applied by
-hand, never from its own CI job, and `poly-nodes`/`minecraft-node`/
-`immich-node` are all manually-applied environments, not persistent
-CI-managed infra like `nodes/`.
+`environments/minecraft-node/**`, `environments/immich-node/**`, and
+`environments/workstation/**` deliberately do **not** trigger this
+workflow — the runner is applied by hand, never from its own CI job, and
+`poly-nodes`/`minecraft-node`/`immich-node`/`workstation` are all
+manually-applied environments, not persistent CI-managed infra like
+`nodes/`.
 
 1. **provision** — `terraform apply` against the `environments/nodes` root
    module, producing `environments/nodes/inventory.ini` via the `local_file`
@@ -790,9 +873,11 @@ for exactly what was dropped.
 
 Note that `qm set -scsiN <device>,ro=1` (used by `immich-node`'s raw-disk
 passthrough — see [above](#the-raw-disk-passthrough-pattern-nullresource--local-exec))
-runs as `root` over plain SSH, not through the Terraform provider's API
-token — so it isn't bound by `TerraformProv`'s privilege list at all, and
-doesn't need any addition to the table above.
+and `qm set -usbN host=<vendorid:productid>` (used by `workstation`'s
+keyboard/mouse/webcam passthrough) both run as `root` over plain SSH, not
+through the Terraform provider's API token — so neither is bound by
+`TerraformProv`'s privilege list at all, and neither needs any addition to
+the table above.
 
 ## Troubleshooting notes (things that actually broke)
 
@@ -1058,6 +1143,9 @@ doesn't need any addition to the table above.
   any future VM whose workload turns out to depend on specific CPU
   features (AES-NI, AVX, etc.) — the default here has always been the
   conservative one, and it's opt-in per environment, not automatic.
+  `environments/workstation` hit the same non-hot-pluggable behavior for a
+  different field (`vga` type, not `cpu.type`) — see the next entry and
+  that environment's own README.
 
 - **Node VMs (and, before the serial console fix, the runner) had no usable
   serial console.** The Terraform-managed VM resources didn't set an
@@ -1363,6 +1451,78 @@ doesn't need any addition to the table above.
   what was asked (ignore cluster state, mount `/etc/pve` writable and
   local-only), not a warning that something is already broken.
 
+- **Proxmox's API rejects any non-root request to set real-device config
+  on `usbN`/`scsiN`, including a fully-privileged API token — surfaces as
+  `only root can set 'usbN' config for real devices`.** Hit first for
+  `immich-node`'s raw exFAT-disk passthrough (`scsiN`), and again for
+  `environments/workstation`'s keyboard/mouse/webcam (`usbN`) — same root
+  cause both times: this class of config bypasses Proxmox's own privilege
+  model entirely and requires `root@pam`, no matter what the API token's
+  ACL grants. There's no fix on the Terraform-provider side; the working
+  pattern in both environments is a `null_resource` + `local-exec` running
+  `qm set` directly over SSH as root, with `lifecycle { ignore_changes =
+  [usb] }` (or the disk-equivalent) on the VM resource itself — otherwise
+  the provider's own `refresh`/`plan` sees the out-of-band device as drift
+  and tries to "fix" it through the API token, hitting the exact same
+  error. See [the raw-disk-passthrough pattern](#the-raw-disk-passthrough-pattern-nullresource--local-exec)
+  above and `environments/workstation/README.md` for the USB-specific
+  version, including the positional-list index-shifting caveat that comes
+  with it.
+
+- **`virtio-gl` is single-head only in Proxmox's QEMU build — multi-monitor
+  needs `qxl2` instead, at the cost of GPU acceleration.** Tried
+  `vga_type = "virtio-gl"` first for `environments/workstation` (GPU-
+  accelerated 2D/desktop compositing via Venus/virgl through the host's
+  i915), which worked fine on one monitor but never showed a second
+  output no matter how the *host*-side X session was laid out with
+  `xrandr` — the raw device only exposes one video head, confirmed as a
+  known Proxmox limitation (not a config mistake) via the Proxmox forum.
+  Switched to `vga_type = "qxl2"` — QXL's SPICE-native multi-monitor
+  support is the only officially-supported path to more than one head,
+  trading away GPU offload (rendering becomes CPU-side) for it. Acceptable
+  here since the actual workload (browser/office/casual 2D games) doesn't
+  need hardware 3D anyway. **Changing `vga_type` on an existing VM is not
+  hot-pluggable** — same class of gotcha as `cpu_type` above — a guest-side
+  `reboot` keeps using the old QEMU display device; only a full `qm stop
+  && qm start` picks up the new one.
+
+- **A `qxl2` VM only activated one virtual head even with the right
+  `vga_type` set — because the SPICE client, not the guest, decides how
+  many heads to use.** `xrandr --query` inside the guest showed a single
+  `connected` output and three `disconnected` ones despite `vga: qxl2`
+  being correctly in the VM config — because `remote-viewer` was started
+  with plain `--full-screen` (occupies exactly one physical monitor on the
+  client side, so it only ever told the guest about one). `spice-vdagent`
+  activates additional QXL heads in response to what the SPICE client
+  reports about the client's own display layout, not proactively. Fixed
+  by using `remote-viewer --full-screen=all` instead, which reports every
+  physical monitor on the client (here, the two external monitors plugged
+  into the same host running the viewer — see
+  `scripts/desktop-kiosk-setup.sh`) and gets both QXL heads activated in
+  the guest as a result.
+
+- **SPICE draws no mouse cursor at all when the mouse is passed through to
+  the guest as a raw USB device instead of going through the SPICE input
+  channel — looks like a rendering bug, isn't one.** On
+  `environments/workstation`, the physical mouse moved the pointer and
+  clicked correctly inside the guest, but no cursor was ever visually
+  drawn on screen (forcing Tab+Enter navigation through the Ubuntu
+  installer). Root cause: SPICE only renders a cursor overlay when mouse
+  input arrives over its own input channel; a raw `usbN host=vendorid:
+  productid` passthrough sends the device straight to the guest,
+  bypassing that channel entirely, so SPICE has no idea a pointer exists
+  to draw. Normally this would be an unavoidable trade-off of USB
+  passthrough — but on this particular setup the SPICE client
+  (`remote-viewer`) and the Proxmox host run on the very same physical
+  machine (see the kiosk pattern above), so there was never a latency
+  reason to route the mouse around the host in the first place. Fixed by
+  removing the mouse from `usb_devices` and letting the host's own X
+  session handle it normally — SPICE picks the cursor back up via its
+  input channel as soon as the mouse isn't being passed through anymore.
+  The keyboard and webcam are unaffected — this is specifically a
+  mouse/SPICE-cursor interaction, not a general problem with USB
+  passthrough.
+
 ## Status
 
 - [x] Two-node Proxmox cluster (`lab-cluster`) — one nested (`.20`, peak
@@ -1393,8 +1553,8 @@ doesn't need any addition to the table above.
 - [x] `docker`/`github-runner` Ansible roles are provisioning-flow
       agnostic (`ansible_user`-driven), no more hardcoded `vagrant`
 - [x] Node/runner VM provisioning extracted into a reusable module
-      (`modules/proxmox-vm`) shared by every root module — no more
-      duplicated resource blocks between environments.
+      (`modules/proxmox-vm`) shared by every cloud-init-based root module
+      — no more duplicated resource blocks between environments.
       Node *count* is still driven by each environment's `var.nodes` map
       default (not yet parameterized from outside the module/environment),
       so adding a node today still means editing that default rather than
@@ -1439,6 +1599,19 @@ doesn't need any addition to the table above.
       (`null_resource` + `local-exec`) for the recovery-disk bind. Not
       wired into `pipeline.yml`, applied manually like `poly-nodes`/
       `minecraft-node`.
+- [x] `environments/workstation` added — a GUI-installed Ubuntu Desktop
+      VM on `pve-rog`, used as an actual personal computer via external
+      monitors/keyboard/mouse/webcam passed through to the VM, with the
+      host itself running as a local SPICE kiosk
+      (`scripts/desktop-kiosk-setup.sh`). Deliberately not built on
+      `modules/proxmox-vm` (GUI install, not cloud-init). Rejected GPU
+      passthrough (Kepler VFIO reset bug, EOL driver branch) and
+      `virtio-gl` (single-head only in Proxmox's QEMU build) in favor of
+      `qxl2` for two-monitor SPICE support. Reused the raw-passthrough
+      `null_resource` + SSH pattern for real USB devices. Not wired into
+      `pipeline.yml`, applied manually like `poly-nodes`/`minecraft-node`/
+      `immich-node`. See its own
+      [`environments/workstation/README.md`](environments/workstation/README.md).
 - [x] Dedicated hardware acquired and joined the cluster (`.30`) — no
       longer fully nested-only, though `.20` stays nested by choice (see
       Architecture above)
