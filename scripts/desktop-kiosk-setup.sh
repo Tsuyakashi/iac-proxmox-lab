@@ -87,7 +87,7 @@ cat > "${KIOSK_HOME}/.config/openbox/autostart" << EOF
 # два внешних монитора, VGA-1 слева, DP-1 справа от него. Если физически
 # переключишь порты/имена выходов другие — проверь актуальные через
 # 'xrandr --query' под этим же пользователем и поправь имена ниже.
-xrandr --output LVDS-1 --off --output VGA-1 --auto --output DP-1 --auto --right-of VGA-1 &
+xrandr --output LVDS-1 --off --output DP-1 --auto --output VGA-1 --auto --right-of DP-1 &
 
 unclutter --idle 1 &          # прятать курсор, когда не двигается — киоск, не десктоп с мышью хоста
 xset s off -dpms               # не гасить экран — это "постоянно включённый" ПК, не ноут на батарейке
@@ -113,7 +113,7 @@ for k, v in d.items():
         } > /tmp/${VMID}.vv
     fi
     if [ -s /tmp/${VMID}.vv ]; then
-        remote-viewer --full-screen --title="${VM_TITLE}" /tmp/${VMID}.vv
+        remote-viewer --full-screen=all --title="${VM_TITLE}" /tmp/${VMID}.vv
     else
         echo "\$(date): не удалось получить spice-тикет для VM ${VMID}, повтор через 10с" >> /tmp/kiosk-errors.log
         cat /tmp/${VMID}.vv.err >> /tmp/kiosk-errors.log
