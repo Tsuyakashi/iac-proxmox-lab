@@ -70,7 +70,7 @@ variable "nodes" {
     proxmox_node      = optional(string)
     datastore_id_disk = optional(string, "local-lvm")
     disk_size         = optional(number, 64)
-    vga_type          = optional(string, "virtio-gl")
+    vga_type          = optional(string, "qxl2")
     vga_memory        = optional(number, 64)
     iso_file_id       = optional(string, null)
     boot_from_iso     = optional(bool, true)
@@ -86,12 +86,14 @@ variable "nodes" {
     #     забутиться через scsi1 passthrough), теперь установка идёт
     #     через iso_file_id ниже, флешка вообще не используется.
     "ubuntu-workstation" = {
-      tag_name    = "workstation",
-      memory      = 8192,
-      cores       = 4,
-      mac         = "BC:24:11:9A:2C:71",
-      iso_file_id = "local:iso/ubuntu-26.04-desktop-amd64.iso",
-      usb_devices = ["13d3:5188", "0c45:5004", "1532:0085", "08bb:2902", "046d:0825"]
+      tag_name      = "workstation",
+      memory        = 8192,
+      cores         = 4,
+      vga_type      = "qxl2",
+      mac           = "BC:24:11:9A:2C:71",
+      iso_file_id   = "local:iso/ubuntu-26.04-desktop-amd64.iso",
+      boot_from_iso = false,
+      usb_devices   = ["13d3:5188", "0c45:5004", "08bb:2902", "046d:0825"]
     }
   }
 }
