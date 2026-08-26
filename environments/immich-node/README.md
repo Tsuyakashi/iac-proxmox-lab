@@ -135,12 +135,27 @@ After=local-fs.target
 [Mount]
 What=/dev/sdb
 Where=/mnt/recovery-ro
-Type=fuse.exfat-fuse
+Type=exfat-fuse
 Options=ro
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+> **⚠️ `Type=` — не `fuse.exfat-fuse`, а `exfat-fuse`.** Пакет
+> `exfat-fuse` на текущей версии Ubuntu ставит бинарник
+> `/sbin/mount.exfat-fuse` (проверено: `dpkg -L exfat-fuse | grep bin`).
+> Systemd для `Type=<X>` вызывает `mount -t <X>`, который резолвится в
+> хелпер по шаблону `/sbin/mount.<X>` — с `Type=exfat-fuse` это находит
+> `/sbin/mount.exfat-fuse` и работает. Более старый/другой вариант
+> `Type=fuse.exfat-fuse` идёт через generic FUSE-враппер
+> (`/sbin/mount.fuse`), который в свою очередь ищет в `PATH` команду
+> **без** префикса `mount.` — то есть `exfat-fuse` — а такого бинарника
+> в пакете нет, отсюда `exfat-fuse: not found` (`status=127`) на старте
+> systemd, при том что ручной `sudo mount.exfat-fuse ...` работает без
+> проблем. Если после апдейта дистрибутива/пакета юнит вдруг снова не
+> стартует с `status=127` — первым делом сверить `dpkg -L exfat-fuse`
+> на актуальное имя бинарника, соответствие могло опять смениться.
 
 ```bash
 sudo systemctl daemon-reload
@@ -153,8 +168,59 @@ sudo systemctl enable --now mnt-recovery-ro.mount
 находит пустую папку и повторяет цикл. Плюс bind-mount в
 `docker-compose.yml` резолвится в момент старта контейнера — если диск
 примонтирован на хосте VM уже после старта контейнера, нужен
-`docker compose restart immich-server`, иначе контейнер продолжит
-видеть старую (пустую) точку монтирования.
+`docker compose restart immich-server` (или `systemctl restart
+immich.service`), иначе контейнер продолжит видеть старую (пустую)
+точку монтирования.
+
+**Симптом на стороне джобов, если маунт пропал, а Immich уже
+крутится:** массовые `ENOENT: no such file or directory` /
+`Input file is missing` в логе `immich_server` по всем джобам, которые
+трогают файл (`AssetExtractMetadata`, `AssetGenerateThumbnails`,
+`PersonGenerateThumbnail` — последнее особенно заметно на странице
+**Job Queues → Facial Recognition**, поскольку генерация превью лица
+идёт после кластеризации). Из-за того, что `stat()` на несуществующий
+файл падает почти мгновенно, а не гоняет реальную ML-инференцию,
+очередь **Waiting** на графике "Jobs over time" обманчиво резко падает
+— выглядит как быстрый прогресс, на деле это волна фейлов при
+低-загрузке CPU (в инциденте 26.08.2026 — 13.5% CPU при "обработке"
+тысяч задач в минуту).
+
+**Разбор такого инцидента, если он уже произошёл:**
+
+```bash
+# 1. Убедиться, что диск реально не смонтирован
+sudo systemctl status 'mnt-recovery\x2dro.mount'
+# смотреть на "exit-code" / "status=127" в journalctl-выхлопе юнита
+
+# 2. Проверить, что мешает бинарнику найтись (см. врезку про Type= выше)
+which mount.exfat-fuse
+dpkg -L exfat-fuse | grep bin
+
+# 3. Смонтировать (после фикса Type= в юните, если он был неверным)
+sudo systemctl daemon-reload
+sudo systemctl start 'mnt-recovery\x2dro.mount'
+
+# 4. Убедиться, что видно с хоста VM
+ls /mnt/recovery-ro
+
+# 5. Перезапустить стек, чтобы контейнер увидел непустой bind-mount
+#    (голый `docker restart immich_server` тоже работает, но раз стек
+#    управляется через systemd — предпочтительно так:)
+sudo systemctl restart immich.service
+
+# 6. Проверить, что контейнер видит файлы
+docker exec immich_server ls -la /mnt/recovery-ro
+
+# 7. В Immich UI: Trash — проверить, не улетели ли ассеты как offline
+#    за время простоя диска. Если да — Scan Library ПЕРЕД Restore,
+#    иначе следующий scan/cron повторит цикл (см. предупреждение выше)
+
+# 8. Job Queues → Remove failed jobs (по всем затронутым очередям)
+
+# 9. Пересканировать External Library и перезапустить джобы по цепочке:
+#    Metadata Extraction → Thumbnail Generation → Face Detection
+#    → Facial Recognition
+```
 
 ## docker-compose, не swarm
 
@@ -212,7 +278,8 @@ terraform apply
    через числовые uid/gid — см. основной README, там разобран весь
    траблшутинг с `wrong permissions`/`FATAL` при первом старте postgres)
 2. Установка `exfat-fuse`, монтирование `recovery-ro`
-3. Накат systemd-юнитов (`mnt-recovery-ro.mount`, `immich.service`)
+3. Накат systemd-юнитов (`mnt-recovery-ro.mount`, `immich.service`) —
+   **см. врезку выше про `Type=exfat-fuse`**, не `fuse.exfat-fuse`
 4. `qm stop 101 && qm start 101` — если `cpu_type` менялся на уже
    существующей VM, для применения нужен полный рестарт, не reboot
    изнутри гостя
@@ -229,3 +296,9 @@ docker exec -it immich_server ls -la /mnt/recovery-ro
 # postgres поднялась без permission errors
 docker compose logs database | grep "ready to accept connections"
 ```
+
+## Журнал инцидентов
+
+| Дата | Что случилось | Причина | Фикс |
+|---|---|---|---|
+| 2026-08-26 | `mnt-recovery-ro.mount` в `failed`, тысячи `ENOENT`/`Input file is missing` в логах `immich_server`, очередь Facial Recognition резко "падает" (фейлы, не прогресс) | `Type=fuse.exfat-fuse` в юните не матчился с реальным бинарником пакета (`/sbin/mount.exfat-fuse`, без префикса `fuse.`) → `exfat-fuse: not found`, `status=127` | Юнит переведён на `Type=exfat-fuse`; после ремонта — `systemctl restart immich.service` для пересборки bind-mount в контейнере; проверено, что `Trash`/offline-ассеты не пострадали до перезапуска (сработали вовремя) |
