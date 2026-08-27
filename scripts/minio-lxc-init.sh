@@ -24,6 +24,14 @@ CT_BRIDGE="vmbr0"
 # gets the same treatment here. See README Troubleshooting notes.
 CT_IP="192.168.100.100/24"
 CT_GATEWAY="192.168.100.1"
+# Pinned, not inherited from the host — bare-pve's own /etc/resolv.conf is
+# Tailscale MagicDNS (100.100.100.100), which only resolves inside the
+# host's netns (tailscaled intercepts it via host-only iptables rules).
+# A freshly-created LXC copies that resolv.conf verbatim but has no such
+# interception in its own netns, so 100.100.100.100 is a dead address inside
+# the container -> apt-get et al hang/fail with DNS resolution errors even
+# though routing/NAT is fine. See README Troubleshooting notes.
+CT_NAMESERVERS="192.168.100.1 8.8.8.8"
 STORAGE="local-lvm"
 TEMPLATE_STORAGE="local"
 TEMPLATE="ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
@@ -46,6 +54,7 @@ if ! pct status "${CTID}" &>/dev/null; then
         --cores "${CT_CORES}" \
         --rootfs "${STORAGE}:${CT_DISK_GB}" \
         --net0 "name=eth0,bridge=${CT_BRIDGE},ip=${CT_IP},gw=${CT_GATEWAY}" \
+        --nameserver "${CT_NAMESERVERS}" \
         --unprivileged 1 \
         --features "nesting=1" \
         --onboot 1
@@ -57,6 +66,17 @@ else
     if ! echo "${CURRENT_NET0}" | grep -q "ip=${CT_IP}"; then
         echo "net0 not pinned to ${CT_IP}, updating (CT will restart to apply)..."
         pct set "${CTID}" --net0 "name=eth0,bridge=${CT_BRIDGE},ip=${CT_IP},gw=${CT_GATEWAY}"
+        pct reboot "${CTID}" 2>/dev/null || true
+        sleep 5
+    fi
+
+    # idempotent guard: same story for nameserver — CT may have inherited
+    # the host's Tailscale MagicDNS resolv.conf at creation time, or the
+    # host may have joined/left tailscale between runs of this script.
+    CURRENT_NS=$(pct config "${CTID}" | awk '/^nameserver:/{print}')
+    if ! echo "${CURRENT_NS}" | grep -q "192.168.100.1"; then
+        echo "nameserver not pinned to ${CT_NAMESERVERS}, updating (CT will restart to apply)..."
+        pct set "${CTID}" --nameserver "${CT_NAMESERVERS}"
         pct reboot "${CTID}" 2>/dev/null || true
         sleep 5
     fi
