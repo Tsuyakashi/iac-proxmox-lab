@@ -15,7 +15,6 @@ on:
 
 env:
   TF_VAR_proxmox_endpoint: ${{ secrets.PROXMOX_ENDPOINT }}
-  TF_VAR_proxmox_api_token: ${{ secrets.PROXMOX_API_TOKEN }}
   TF_VAR_vm_ssh_public_key: ${{ secrets.VM_SSH_PUBLIC_KEY }}
   TF_VAR_ci_ssh_public_key: ${{ secrets.CI_SSH_PUBLIC_KEY }}
   AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
@@ -44,6 +43,19 @@ jobs:
           echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
           echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
           ssh-add ~/.ssh/proxmox_provider_key
+
+      - name: Fetch secrets from Vault
+        env:
+          VAULT_ADDR: http://192.168.100.200:8200
+        run: |
+          VAULT_TOKEN=$(vault write -field=token auth/approle/login \
+            role_id="${{ secrets.VAULT_ROLE_ID }}" \
+            secret_id="${{ secrets.VAULT_SECRET_ID }}")
+
+          API_TOKEN=$(VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=api_token proxmox/terraform-provider)
+
+          echo "::add-mask::$API_TOKEN"
+          echo "TF_VAR_proxmox_api_token=$API_TOKEN" >> "$GITHUB_ENV"
 
       - name: Terraform init
         run: terraform init
