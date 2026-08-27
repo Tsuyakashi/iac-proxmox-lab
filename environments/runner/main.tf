@@ -58,6 +58,7 @@ module "ci_runner" {
     "chmod +x /usr/local/bin/vault",
     "curl -o /usr/local/bin/mc https://dl.min.io/aistor/mc/release/linux-amd64/mc",
     "chmod +x /usr/local/bin/mc",
-    "for i in 1 2 3; do ping -c1 -W2 192.168.100.3 && break || sleep 2; done || true"
+    "for i in 1 2 3; do ping -c1 -W2 192.168.100.3 && break || sleep 2; done || true",
+    "chown ubuntu:ubuntu /home/ubuntu"
   ]
 }
