@@ -18,7 +18,7 @@ variable "proxmox_insecure" {
 variable "proxmox_node" {
   description = "Target Proxmox node name"
   type        = string
-  default     = "pve"
+  default     = "bare-pve"
 }
 
 variable "template_vm_id" {

@@ -10,7 +10,7 @@
 | | |
 |---|---|
 | VM ID | 101 |
-| Host | `pve` (`.30`) |
+| Host | `bare-pve` (`.30`) |
 | IP | `192.168.100.60/24` |
 | Ресурсы | 4 vCPU / 4GB RAM / 70GB disk (`local-lvm`) |
 | CPU type | `host` |

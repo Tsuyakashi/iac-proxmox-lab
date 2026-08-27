@@ -13,7 +13,7 @@ module "node" {
   source = "../../modules/proxmox-vm"
 
   name           = "prod-node"
-  proxmox_node   = "pve"
+  proxmox_node   = "bare-pve"
   template_vm_id = 9000
   tags           = ["prod"]
   cores          = 2
@@ -39,7 +39,7 @@ module "ci_runner" {
   source = "../../modules/proxmox-vm"
 
   name           = "ci-runner"
-  proxmox_node   = "pve"
+  proxmox_node   = "bare-pve"
   template_vm_id = 9000
   tags           = ["ci"]
   cores          = 1

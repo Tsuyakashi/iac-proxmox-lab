@@ -17,7 +17,7 @@ module "node" {
   mac_address       = each.value.mac
   datastore_id_disk = each.value.datastore_id_disk
 
-  template_node = "pve"
+  template_node = "bare-pve"
   proxmox_node  = coalesce(each.value.proxmox_node, var.proxmox_node)
   migrate       = true # временно, на время миграции
 
