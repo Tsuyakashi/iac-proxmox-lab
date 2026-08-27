@@ -11,6 +11,12 @@ path "proxmox/data/terraform-provider" {
 path "proxmox/data/ci-ssh-key" {
   capabilities = ["read"]
 }
+path "proxmox/data/minio-credentials" {
+  capabilities = ["read"]
+}
+path "proxmox/data/github-runner-pat" {
+  capabilities = ["read"]
+}
 EOF
 
 vault write auth/approle/role/ci-runner \
