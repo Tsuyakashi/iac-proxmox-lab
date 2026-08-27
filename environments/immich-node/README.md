@@ -12,8 +12,15 @@
 | VM ID | 101 |
 | Host | `bare-pve` (`.30`) |
 | IP | `192.168.100.60/24` |
-| Ресурсы | 4 vCPU / 4GB RAM / 70GB disk (`local-lvm`) |
+| Ресурсы | 2 vCPU / 4GB RAM / 100GB disk (`local-lvm`) |
 | CPU type | `host` |
+
+> Синхронизировано с дефолтом `var.nodes["immich-node"]` в `variables.tf`
+> (`cores = 2`, `memory = 4096`, `disk_size = 100`) — эта таблица раньше
+> разъехалась с реальными значениями (показывала 4 vCPU / 70GB), см.
+> [../../docs/troubleshooting.md#immich-node-variablestf-had-a-strict-object-type-violation-and-a-stale-readme-table](../../docs/troubleshooting.md#immich-node-variablestf-had-a-strict-object-type-violation-and-a-stale-readme-table).
+> Если ресурсы этой VM снова поменяются в `variables.tf` — обнови и эту
+> строку в том же PR, не отдельным заходом.
 
 Не изолирована в отдельный VLAN/network namespace (в отличие от
 `minecraft-node`) — Immich наружу не выставляется.
@@ -302,3 +309,4 @@ docker compose logs database | grep "ready to accept connections"
 | Дата | Что случилось | Причина | Фикс |
 |---|---|---|---|
 | 2026-08-26 | `mnt-recovery-ro.mount` в `failed`, тысячи `ENOENT`/`Input file is missing` в логах `immich_server`, очередь Facial Recognition резко "падает" (фейлы, не прогресс) | `Type=fuse.exfat-fuse` в юните не матчился с реальным бинарником пакета (`/sbin/mount.exfat-fuse`, без префикса `fuse.`) → `exfat-fuse: not found`, `status=127` | Юнит переведён на `Type=exfat-fuse`; после ремонта — `systemctl restart immich.service` для пересборки bind-mount в контейнере; проверено, что `Trash`/offline-ассеты не пострадали до перезапуска (сработали вовремя) |
+| 2026-08-27 | Ревью диффа обнаружило, что дефолт `var.nodes["immich-node"]` в `variables.tf` разъезжался с этой таблицей (README показывал 4 vCPU/70GB, реальные значения — 2 vCPU/100GB) | Таблица не обновлялась после апгрейда ресурсов диска | Таблица выше синхронизирована с `variables.tf` (2 vCPU / 4GB / 100GB); см. [docs/troubleshooting.md](../../docs/troubleshooting.md#immich-node-variablestf-had-a-strict-object-type-violation-and-a-stale-readme-table) для полного разбора (тот же ревью также поймал три лишних ключа в дефолте, не описанных в `object({...})`-типе, до того как они попали в `apply`) |
