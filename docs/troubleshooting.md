@@ -263,6 +263,8 @@ once over a VPN and re-hosting it on the self-hosted MinIO instance
 (`tools/` prefix, anonymous-download bucket policy); the runner's
 `extra_runcmd` pulls it from there instead. See
 [architecture.md#state-backend-lives-off-both](architecture.md#state-backend-lives-off-both).
+The same `tools/` mirror is later reused for the Vault binary too — see
+[the mlock entry below](#vault-mlock-enomem-in-unprivileged-lxc).
 
 ## MinIO client's old download path (`dl.min.io/client/mc/release/linux-amd64/mc`) now serves a small HTML page instead of the binary
 
@@ -688,3 +690,67 @@ cursor back up via its input channel as soon as the mouse isn't being
 passed through anymore. The keyboard and webcam are unaffected — this is
 specifically a mouse/SPICE-cursor interaction, not a general problem with
 USB passthrough.
+
+<a id="vault-mlock-enomem-in-unprivileged-lxc"></a>
+## Vault (CT 300) failed to start with `Failed to lock memory: cannot allocate memory` even with `setcap cap_ipc_lock=+ep` correctly applied inside an unprivileged LXC
+
+`vault-lxc-init.sh` follows the same `setcap`-on-the-binary pattern
+decided on for `mlock` (rather than `disable_mlock = true`, to keep the
+protection live regardless of host swap state — see the script header).
+`getcap /usr/local/bin/vault` confirmed the capability was present
+(`cap_ipc_lock=ep`), and `whoami` inside the CT was `root` — so the usual
+"capability missing" or "wrong user" explanations didn't fit. `systemctl
+status vault` showed a restart loop (`auto-restart`, restart counter
+climbing into the hundreds), and `journalctl -u vault` gave the actual
+error on every attempt:
+
+```
+Error initializing core: Failed to lock memory: cannot allocate memory
+This usually means that the mlock syscall is not available.
+```
+
+The key diagnostic detail: this is `ENOMEM`, not `EPERM`. `EPERM` would
+mean the process lacks permission to call `mlockall()` at all (the
+capability-missing case); `ENOMEM` means the call is permitted but the
+kernel refuses because the process has hit its `RLIMIT_MEMLOCK` ceiling.
+A file capability (`cap_ipc_lock=+ep` via `setcap`) grants the
+*permission* to attempt the lock — it does **not** raise the *limit* on
+how much memory can be locked. In an unprivileged LXC, that limit is
+enforced one layer below systemd's own `LimitMEMLOCK=infinity` (which
+only governs the resource limit systemd hands to the process it starts,
+not the ceiling the *container itself* is allowed by the host) — it's
+the host-side LXC config, `lxc.prlimit.memlock` in
+`/etc/pve/lxc/<CTID>.conf`, that ultimately caps this for anything
+running inside the container, and it defaults far too low for Vault's
+default lock size on a fresh unprivileged CT.
+
+**Fix:** set `lxc.prlimit.memlock: unlimited` directly in the container's
+Proxmox-side config file (`/etc/pve/lxc/<CTID>.conf`) — not something
+`pct set`/any CLI flag exposes, has to be appended to the raw conf file.
+Requires a full CT restart (not a `vault.service` restart) to take
+effect, since the limit is applied at container-start time from the host
+netns/cgroup setup, not something a running container can pick up live.
+`vault-lxc-init.sh` now does this as an idempotent guard alongside the
+`net0`/nameserver guards already in the script — checks for the line in
+`/etc/pve/lxc/${CTID}.conf`, appends and reboots the CT if missing,
+no-ops otherwise:
+
+```bash
+CONF_FILE="/etc/pve/lxc/${CTID}.conf"
+if ! grep -q "lxc.prlimit.memlock" "$CONF_FILE"; then
+    echo "lxc.prlimit.memlock: unlimited" >> "$CONF_FILE"
+    if [ "$(pct status "${CTID}" | awk '{print $2}')" == "running" ]; then
+        pct reboot "${CTID}" 2>/dev/null || true
+        sleep 5
+    fi
+fi
+```
+
+After this landed, `vault server` started cleanly on the first attempt —
+`setcap` alone was necessary but not sufficient; both the capability
+*and* the host-side `prlimit` needed to line up. Worth remembering for
+any future service in this repo that wants real `mlock()` semantics
+inside an unprivileged LXC (not just Vault) — the same two-part
+requirement (file capability + `lxc.prlimit.memlock`) applies generally,
+this just happened to be the first workload in the lab that actually
+exercises `mlock`.

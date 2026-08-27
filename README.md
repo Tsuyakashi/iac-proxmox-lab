@@ -28,9 +28,10 @@ here (nested → bare metal, the flat-layout → modules refactor), see
 │  └── vmbr0 ─────────┐          │       │  └── vmbr0 ─────────┐                 │
 │       ├ VM 9000 golden image   │       │       ├ VM 9000 golden image (own)    │
 │       ├ prod/stage/dev nodes   │       │       ├ CT 200: minio (state backend) │
-│       ├ poly-nodes (WIP)       │       │       ├ VM: ci-runner                 │
-│       └ VM 100: workstation    │       │       ├ VM 101: immich-node           │
-│         (GUI-installed desktop)│       │       └ NFS export → shared-storage   │
+│       ├ poly-nodes (WIP)       │       │       ├ CT 300: vault (secrets)       │
+│       └ VM 100: workstation    │       │       ├ VM: ci-runner                 │
+│         (GUI-installed desktop)│       │       ├ VM 101: immich-node           │
+│                                │       │       └ NFS export → shared-storage   │
 └──────────────┬─────────────────┘       └──────────────┬────────────────────────┘
                │                                        │
                └──────────────── corosync/knet ─────────┘
@@ -49,8 +50,8 @@ commands, and the web UI are all driven from there.
 
 **Two nodes, one cluster (`nexus-cluster`), plus a QDevice arbiter — both
 nodes bare metal.** `bare-pve` (`.30`) holds storage and anything that must
-not go down (MinIO, CI runner, immich-node); `pve-rog` (`.20`) keeps the
-"extra CPU/RAM for peak load" role and also hosts `workstation` — a
+not go down (MinIO, Vault, CI runner, immich-node); `pve-rog` (`.20`) keeps
+the "extra CPU/RAM for peak load" role and also hosts `workstation` — a
 GUI-installed desktop VM used as an actual personal computer (see
 [Other environments](docs/architecture.md#other-environments)). The full
 story of how both nodes ended up bare metal (one of them was nested Proxmox
@@ -75,6 +76,11 @@ physical LAN quirks, and the state-backend placement is in
   backend for every root module, independent of the runner and the node
   VMs; also serves as an internal binary mirror for tools blocked by
   regional restrictions (see [docs/architecture.md](docs/architecture.md#state-backend-lives-off-both))
+- **Vault** (LXC, systemd daemon, no Docker, raft/integrated storage) —
+  standing up on `bare-pve` (CT 300) as the future home for secrets
+  currently living as plaintext on disk (`/root/terraform-token.json`,
+  cloud-init snippets). Not yet wired into any environment's secret flow —
+  see the Status section below and `scripts/vault-lxc-init.sh`.
 - **Ansible** — post-provision configuration, delegated to
   [`swarm-lab`](../swarm-lab)'s playbook via a pinned git tag (see
   [CI/CD](#cicd) below)
@@ -120,7 +126,7 @@ scripts/
 ├── proxmox-init.sh                   # Proxmox-side (either node): terraform user/role/token,
 │                                     #   golden image, thin-pool autoextend threshold
 ├── minio-lxc-init.sh                 # Proxmox-side (bare-pve): MinIO LXC (state backend)
-├── vault-lxc-init.sh                 # Proxmox-side (bare-pve): Vault LXC, manual unseal
+├── vault-lxc-init.sh                 # Proxmox-side (bare-pve): Vault LXC (CT 300), manual unseal
 ├── shared-storage-creation.sh        # Proxmox-side (bare-pve): NFS export prep
 ├── desktop-kiosk-setup.sh            # Proxmox-side (pve-rog): local SPICE kiosk for workstation
 └── register-github-runner.sh         # Registers the GitHub Actions runner agent on ci-runner
@@ -187,7 +193,34 @@ mc mb local/tools --ignore-existing
 mc anonymous set download local/tools
 ```
 
-### 4. (Optional) Cluster the nodes and add a QDevice arbiter
+### 4. (Optional, WIP) Stand up Vault (on `bare-pve`)
+
+```bash
+ssh root@<proxmox-ip> 'bash -s' < scripts/vault-lxc-init.sh
+```
+
+Creates CT 300 (Vault, statically addressed, raft/integrated storage — no
+external Consul needed for a single-node deploy). Not yet consuming any
+secret currently living on disk — this stands up the service itself. See
+[docs/architecture.md](docs/architecture.md) and the script header for the
+`mlock`/unseal reasoning, and
+[docs/troubleshooting.md](docs/troubleshooting.md#vault-mlock-enomem-in-unprivileged-lxc)
+for the `Failed to lock memory: cannot allocate memory` pitfall this
+script now guards against on unprivileged LXC.
+
+After the first run, initialize and unseal by hand (deliberately manual —
+no external KMS available in this lab for auto-unseal):
+
+```bash
+pct exec 300 -- env VAULT_ADDR=http://127.0.0.1:8200 vault operator init
+# copy out all 5 unseal keys + the root token — shown ONCE
+pct exec 300 -- env VAULT_ADDR=http://127.0.0.1:8200 vault operator unseal   # x3, different keys
+```
+
+Vault comes back **sealed** after every CT/host restart — repeat the
+`operator unseal` step manually each time.
+
+### 5. (Optional) Cluster the nodes and add a QDevice arbiter
 
 Only relevant once more than one Proxmox node exists.
 
@@ -212,7 +245,7 @@ See [docs/architecture.md](docs/architecture.md#architecture-in-depth) for
 the SSH/`PermitRootLogin` dance this needs and the Tailscale fallback when
 the arbiter isn't on the LAN.
 
-### 5. (Optional) Register cluster-wide shared storage (`bare-pve`)
+### 6. (Optional) Register cluster-wide shared storage (`bare-pve`)
 
 ```bash
 ssh root@192.168.100.30 'bash -s' < scripts/shared-storage-creation.sh
@@ -225,7 +258,7 @@ pvesm add nfs shared-storage \
 See [docs/architecture.md#shared-storage](docs/architecture.md#shared-storage)
 for why the second command is separate and cluster-wide.
 
-### 6. Provision the nodes
+### 7. Provision the nodes
 
 ```bash
 cd environments/nodes/
@@ -240,7 +273,7 @@ terraform apply -parallelism=1
 [docs/troubleshooting.md](docs/troubleshooting.md#concurrent-clones-unreliable)
 for the disk-contention/timeout story.
 
-### 7. (Optional, manual, rare) Provision the CI runner
+### 8. (Optional, manual, rare) Provision the CI runner
 
 ```bash
 cd environments/runner/
@@ -255,9 +288,9 @@ Always run this by hand, never from the self-hosted runner's own CI job —
 see [docs/architecture.md#two-independent-root-modules](docs/architecture.md#two-independent-root-modules)
 for the incident that made this a hard rule.
 
-### 8. (Optional, manual, as-needed) poly-nodes / minecraft-node / immich-node / workstation
+### 9. (Optional, manual, as-needed) poly-nodes / minecraft-node / immich-node / workstation
 
-Same pattern as steps 6/7 — `cd` into the environment, copy the
+Same pattern as steps 7/8 — `cd` into the environment, copy the
 `.tfvars.example`, `terraform init`, `terraform apply`. None are wired into
 `pipeline.yml`. `immich-node` and `workstation` each need a manual pass
 after the first `apply` that Terraform can't reach (guest-OS config, GUI
@@ -335,10 +368,16 @@ Required repo/environment secrets: `PROXMOX_ENDPOINT`, `PROXMOX_API_TOKEN`,
 - [x] MinIO (CT 200) and the CI runner live on `bare-pve`
 - [x] `TerraformProv` role/ACLs live in `/etc/pve` (pmxcfs), cluster-wide —
       no per-node re-verification needed
-- [ ] Vault (or similar) for the secrets currently living as plaintext on
-      disk (`/root/terraform-token.json`, cloud-init snippets) — a
-      `scripts/vault-lxc-init.sh` exists (raft storage, manual unseal) but
-      isn't wired into any environment's secret flow yet
+- [x] Vault (CT 300) stood up on `bare-pve` — LXC, systemd, raft storage,
+      `mlock` genuinely enforced (`setcap cap_ipc_lock` on the binary plus
+      `lxc.prlimit.memlock: unlimited` in the CT's Proxmox-side config —
+      the capability alone isn't sufficient in an unprivileged LXC's user
+      namespace, see
+      [docs/troubleshooting.md](docs/troubleshooting.md#vault-mlock-enomem-in-unprivileged-lxc)),
+      initialized and unsealed. **Not yet wired into any environment's
+      secret flow** — `/root/terraform-token.json` and cloud-init secrets
+      still live as plaintext on disk; migrating them to Vault (AppRole/
+      token auth for the runner, etc.) is a separate follow-up.
 - [x] `immich-node`'s recovery-disk bind is Terraform-managed; what remains
       manual is guest-OS-level config — see
       [environments/immich-node/README.md](environments/immich-node/README.md)
