@@ -112,6 +112,23 @@ else
     fi
 fi
 
+# Idempotent guard: ensure the host kernel allows unprivileged memlock 
+# for Vault's mlock() calls. Without this, even with setcap inside the CT, 
+# Vault might fail with "Failed to lock memory: Cannot allocate memory".
+CONF_FILE="/etc/pve/lxc/${CTID}.conf"
+if ! grep -q "lxc.prlimit.memlock" "$CONF_FILE"; then
+    echo "memlock limit not configured on the host, pinning to unlimited..."
+    echo "lxc.prlimit.memlock: unlimited" >> "$CONF_FILE"
+    
+    # If the container is already up, it needs a reboot to inherit the 
+    # new resource limits from the host netns/cgroups.
+    if [ "$(pct status "${CTID}" | awk '{print $2}')" == "running" ]; then
+        echo "memlock limit updated, rebooting CT to apply host resource limits..."
+        pct reboot "${CTID}" 2>/dev/null || true
+        sleep 5
+    fi
+fi
+
 if [ "$(pct status "${CTID}" | awk '{print $2}')" != "running" ]; then
     pct start "${CTID}"
     sleep 5
