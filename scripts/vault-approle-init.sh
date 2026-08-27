@@ -8,6 +8,9 @@ vault policy write terraform-provisioner - <<EOF
 path "proxmox/data/terraform-provider" {
   capabilities = ["read"]
 }
+path "proxmox/data/ci-ssh-key" {
+  capabilities = ["read"]
+}
 EOF
 
 vault write auth/approle/role/ci-runner \

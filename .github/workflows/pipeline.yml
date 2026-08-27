@@ -34,16 +34,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up SSH key for Proxmox provider
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.CI_SSH_PRIVATE_KEY }}" > ~/.ssh/proxmox_provider_key
-          chmod 600 ~/.ssh/proxmox_provider_key
-          eval "$(ssh-agent -s)"
-          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
-          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
-          ssh-add ~/.ssh/proxmox_provider_key
-
       - name: Fetch secrets from Vault
         env:
           VAULT_ADDR: http://192.168.100.200:8200
@@ -51,11 +41,23 @@ jobs:
           VAULT_TOKEN=$(vault write -field=token auth/approle/login \
             role_id="${{ secrets.VAULT_ROLE_ID }}" \
             secret_id="${{ secrets.VAULT_SECRET_ID }}")
+          echo "::add-mask::$VAULT_TOKEN"
 
           API_TOKEN=$(VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=api_token proxmox/terraform-provider)
-
           echo "::add-mask::$API_TOKEN"
           echo "TF_VAR_proxmox_api_token=$API_TOKEN" >> "$GITHUB_ENV"
+
+          VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=private_key proxmox/ci-ssh-key > ~/.ssh/ci_private_key_from_vault
+
+      - name: Set up SSH key for Proxmox provider
+        run: |
+          mkdir -p ~/.ssh
+          cp ~/.ssh/ci_private_key_from_vault ~/.ssh/proxmox_provider_key
+          chmod 600 ~/.ssh/proxmox_provider_key
+          eval "$(ssh-agent -s)"
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+          ssh-add ~/.ssh/proxmox_provider_key
 
       - name: Terraform init
         run: terraform init
