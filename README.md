@@ -9,6 +9,14 @@ replacement for `swarm-lab`'s own `Vagrantfile` — that stays, so `swarm-lab`
 remains fully self-contained and can be spun up on its own hardware without
 this repo (see [CI/CD](#cicd) for how the two connect via a pinned tag).
 
+For the full reasoning behind the topology, the state-backend split, and
+the raw-disk/USB passthrough pattern, see
+**[docs/architecture.md](docs/architecture.md)**. For "things that actually
+broke and how" (the big one), see
+**[docs/troubleshooting.md](docs/troubleshooting.md)**. For how the repo got
+here (nested → bare metal, the flat-layout → modules refactor), see
+**[docs/history.md](docs/history.md)**.
+
 ## Architecture
 
 ```
@@ -40,302 +48,49 @@ Managed remotely from a laptop (Zenbook) over the LAN — Terraform, `qm`/`pveum
 commands, and the web UI are all driven from there.
 
 **Two nodes, one cluster (`nexus-cluster`), plus a QDevice arbiter — both
-nodes bare metal.** `bare-pve` (`.30`) is dedicated hardware, acquired after
-this project started nested-only; `pve-rog` (`.20`) started life as a nested
-Proxmox instance on the G750JX (running inside libvirt/KVM on that laptop's
-host OS) and was later rebuilt onto its own bare-metal install once the
-justification for nesting (waiting on a second physical machine) went away.
-Both nodes are now real hardware — there is no longer a nested/virtualized
-layer anywhere in the cluster itself. `pve-rog` keeps the "extra CPU/RAM for
-peak load" role it already had, while `bare-pve` holds storage and anything
-that must not go down (MinIO, CI runner, immich-node). `bare-pve`'s second
-physical HDD (shipped with the machine) was wiped and handed off to a
-separate Windows box — it was never part of the Proxmox storage plan. The
-Zenbook runs `corosync-qnetd` and nothing else — no VMs, just a quorum vote
-so the two real nodes survive either one going down without a stuck-at-1-vote
-cluster. Note that the QDevice arbiter needs to be reachable from `bare-pve`
-for its vote to count — if the arbiter isn't on the LAN (e.g. travelling),
-it's reachable over Tailscale instead; see the QDevice/Tailscale entry in
-[Troubleshooting notes](#troubleshooting-notes-things-that-actually-broke)
-below for the mechanics and the chicken-and-egg gotcha it has with a
-cluster that's already lost quorum.
-
-`pve-rog` also hosts `workstation` — a GUI-installed Ubuntu Desktop VM used
-as an actual personal computer (external monitors/keyboard/mouse/webcam
-plugged into the physical laptop, passed through to the VM), with the host
-itself running as a local SPICE kiosk so no other machine is needed to view
-it. This is the one remaining "guest-inside-a-guest-shaped" wrinkle in the
-lab, but it's architecturally unrelated to the Proxmox layer itself being
-nested or not — `pve-rog` is a normal bare-metal Proxmox node now, and
-`workstation` is just another guest on it, the same way any desktop VM would
-be on any Proxmox host. See [Other environments](#other-environments) below
-and its own
-[`environments/workstation/README.md`](environments/workstation/README.md).
-
-**Physical LAN topology, one level below the diagram above:** `bare-pve`
-and `.3` (a Keenetic router) both uplink independently into `.1` — a
-Промсвязь MT-PON-AT-4 GPON ONT acting as the L2 hub between them. The
-Zenbook (`.12`) sits behind `.3`, not behind `bare-pve`. This matters for
-new-host reachability — see the MT-PON-AT-4 entry in
-[Troubleshooting notes](#troubleshooting-notes-things-that-actually-broke)
-below.
-
-**Storage headroom differs by node, not a coincidence.** `pve-rog`'s
-`local-lvm` thin pool has historically run close to its ceiling — the sum of
-the nominal sizes of every thin volume on it has, more than once, exceeded
-the pool's actual capacity, which is exactly the kind of thing thin
-provisioning lets slide until real usage catches up. See the LVM thin pool
-entries in [Troubleshooting notes](#troubleshooting-notes-things-that-actually-broke)
-below for what happens when it does, and what's in place to catch it early.
-`bare-pve` doesn't share this constraint (465GB SSD, comfortably ahead of
-current usage) — it's also where the NFS shared-storage export lives
-(`scripts/shared-storage-creation.sh`), for exactly that reason.
-
-### Two independent root modules, on purpose
-
-`environments/nodes/` and `environments/runner/` are **two separate
-Terraform root modules**, each with its own backend, state, and lifecycle,
-both built from the same shared `modules/proxmox-vm`. This is not
-incidental structure — it's the fix for an actual incident: the CI runner
-used to live in the same state/config as the nodes it provisions. A routine
-change to the shared cloud-init template forced a replace on every resource
-in one `apply`, including the runner VM — which destroyed itself mid-job
-while running that very `apply`. See
-[Troubleshooting notes](#troubleshooting-notes-things-that-actually-broke)
-below for the full story.
-
-Consequences of the split:
-- `terraform apply` in `environments/nodes/` never touches the runner, and
-  vice versa — no shared blast radius.
-- The runner is applied **manually, from a laptop**, never from CI on
-  itself. Both `environments/nodes/` and `environments/runner/` now use an
-  S3 (MinIO) backend — the runner's state was migrated off `local` onto the
-  same bucket (separate `key`), since the actual risk with a local backend
-  wasn't Proxmox dying (in that case state is moot either way — the VMs
-  are gone), but losing the laptop the runner is applied from while the
-  runner VM itself keeps running. See the S3-migration troubleshooting
-  entries below for the mechanics of that move.
-- `pipeline.yml`'s `paths: ['environments/nodes/**', 'modules/**']` filter
-  means pushes under `environments/runner/**` don't trigger the CI job on
-  the nodes — this was true before the split too, but now it's structurally
-  reinforced rather than accidental. Changes under `modules/**` *do*
-  trigger it, since `environments/nodes` depends on that module.
-
-### Other environments
-
-Four more root modules live under `environments/`, all built on the same
-`modules/proxmox-vm` as `nodes/` (except `workstation/`, see below), none
-wired into `pipeline.yml` — all applied manually, on demand:
-
-- **`poly-nodes/`** — infra for a separate project,
-  [`poly-ci`](https://github.com/tsuyakashi/poly-ci): runner/prod/monitoring
-  nodes, structured the same way as `nodes/`. Currently on hold — see the
-  golden-image note below.
-- **`minecraft-node/`** — a single isolated node (own NAT segment, no
-  access to the rest of the LAN) running a Minecraft server + playit.gg
-  tunnel. Short-lived/situational by nature, not part of the core lab.
-- **`immich-node/`** — a single VM (`bare-pve`, `local-lvm`) running Immich
-  via plain `docker compose` (deliberately not swarm — `env_file`/
-  `depends_on` don't survive `docker stack deploy`, and the whole workload
-  is bind-mount/stateful, so swarm's node-portability doesn't apply here
-  anyway). Migrated over from an ad-hoc `docker compose` setup on a
-  non-Proxmox host after a disk-exhaustion incident there took down a
-  cluster node in the process (see the QDevice/Tailscale troubleshooting
-  entry below). Two things about this environment are worth knowing before
-  touching it, both detailed in its own
-  [`environments/immich-node/README.md`](environments/immich-node/README.md)
-  rather than duplicated here:
-  - `cpu_type = "host"` is required, not cosmetic — the default module
-    baseline (`kvm64`) lacks CPU flags (`sse4_2`/`popcnt`/`avx2`) that
-    Immich's machine-learning container needs, and it restart-loops
-    without them.
-  - The photo library lives on a physical exFAT disk passed through to the
-    VM as a raw block device (`qm set ... -scsi1 <device>,ro=1`), not a
-    Terraform-managed datastore volume — `bpg/proxmox` has no declarative
-    way to bind an existing physical device, so this goes through a
-    `null_resource` + `local-exec` workaround. See
-    [The raw-disk-passthrough pattern](#the-raw-disk-passthrough-pattern-nullresource--local-exec)
-    below for why this exists and its limits.
-- **`workstation/`** — a GUI-installed Ubuntu Desktop VM(s) on `pve-rog`,
-  used as an actual personal computer rather than a headless service.
-  Structurally different from every other environment: **not** built on
-  `modules/proxmox-vm` at all — that module is built entirely around
-  `clone{}` from the golden image plus cloud-init user-data, which doesn't
-  fit "install Ubuntu Desktop by hand through the GUI installer". Instead
-  it's a standalone `proxmox_virtual_environment_vm` resource that
-  Terraform only uses to wire up the VM's hardware (disk, network, vga,
-  virtual cdrom with an ISO, USB peripherals, audio) — the OS install
-  itself happens by hand, through the SPICE console, like on real
-  hardware. GPU passthrough was deliberately rejected (Kepler VFIO reset
-  bug with no software fix, plus the 470.xxx driver branch being
-  officially EOL) in favor of paravirtualized video (`vga_type = "qxl2"`,
-  chosen specifically for its two-head SPICE support — `virtio-gl` was
-  tried first and rejected for being single-head-only in Proxmox's QEMU
-  build). Real USB peripherals (keyboard/mouse/webcam) hit the same
-  "only root can set real-device config" API restriction as the raw-disk
-  pattern above, so they're bound the same way (`null_resource` +
-  `local-exec` running `qm set -scsiN`/`-usbN` over SSH). The host itself
-  runs as a local SPICE kiosk (`scripts/desktop-kiosk-setup.sh`) so the VM
-  displays directly on the laptop's own external monitors, with no other
-  machine needed to view it. Full detail — the ISO-vs-raw-flash-drive boot
-  story, the `qxl2` vs `virtio-gl` vs passthrough decision, the kiosk
-  script's `pvesh`/sudoers/DPMS mechanics — is in its own
-  [`environments/workstation/README.md`](environments/workstation/README.md)
-  rather than duplicated here.
-
-`poly-nodes/` clones from a second golden image (VM 9001) on `hdd-storage`
-instead of the main `local-lvm` pool — that disk is currently flaky, so
-9001/`poly-nodes` is WIP and bootstrapped by hand for now (same pattern as
-`proxmox-init.sh` uses for 9000, just not yet scripted).
-
-### The raw-disk-passthrough pattern (`null_resource` + `local-exec`)
-
-Introduced for `immich-node`'s recovery disk, but general enough to note
-here rather than only in that environment's own README, since it's a
-pattern any future environment needing the same thing (an existing
-physical disk, not a Terraform-managed datastore volume) would reuse. The
-same underlying restriction — the Proxmox API rejecting non-root access to
-"real device" config — also applies to USB passthrough (`usbN`, used by
-`environments/workstation` for its keyboard/mouse/webcam), and is worked
-around with the identical `null_resource` + SSH pattern; see that
-environment's own README for the USB-specific version.
-
-`bpg/proxmox` only supports datastore-backed disks declaratively (the
-`disk { ... }` block). Binding an already-existing physical block device
-to a VM has no first-class resource — the only path is `qm set <vmid>
--scsiN <device>,ro=1` run directly against the Proxmox host, wrapped here
-in a `null_resource`:
-
-```hcl
-resource "null_resource" "recovery_ro_bind" {
-  for_each = { for k, v in var.nodes : k => v if v.recovery_ro_device != null }
-
-  triggers = {
-    vm_id  = module.node[each.key].vm_id
-    device = each.value.recovery_ro_device
-  }
-
-  provisioner "local-exec" {
-    command = "ssh root@${var.proxmox_host_ip} qm set ${module.node[each.key].vm_id} -scsi1 ${each.value.recovery_ro_device},ro=1"
-  }
-
-  depends_on = [module.node]
-}
-```
-
-**Known limitations, accepted rather than solved:**
-- `triggers` only reacts to `vm_id` (VM recreated) or the device path
-  changing — a disk detached by hand outside Terraform won't be noticed or
-  restored on the next `apply`. This is drift-tolerant by omission, not
-  drift-corrected.
-- The `scsiN` index is hardcoded per environment, not derived from existing
-  disk config — adding another disk to the same VM on the same index later
-  would collide.
-- `local-exec` runs wherever `apply` runs, not on a fixed CI host — it
-  needs working SSH access to `root@<proxmox_host_ip>` from that exact
-  machine. Currently fine (applied from the same laptop that already has
-  that access for everything else); would need attention if this
-  environment's `apply` ever moved to the self-hosted runner.
-- Proxmox passes through the whole device, not the specific partition
-  requested — `/dev/sdb1` on the host shows up as raw `/dev/sdb` inside the
-  guest.
-- The USB variant (`environments/workstation`) adds one more wrinkle:
-  `usb_devices` is a positional `list(string)`, not keyed by device — see
-  that environment's own README for what happens to `null_resource`
-  indices when the list is edited in the middle.
-
-### State backend lives off both
-
-Terraform state for both root modules (`environments/nodes/backend.tf` and
-`environments/runner/backend.tf`, both S3-compatible) points at MinIO
-running in **CT 200**, an LXC container — pinned to `bare-pve` — not a
-Terraform-managed VM, not colocated with the runner. This is deliberate:
-the backend must survive independently of anything a `terraform apply`
-might do to the infrastructure it describes. MinIO used to run inside the
-runner VM itself, which meant a runner self-destruct also took the state
-backend down with it (`no route to host` on every subsequent
-`terraform init`). See `scripts/minio-lxc-init.sh`.
-
-LXC rather than a VM here is a deliberate trade-off in the *other*
-direction from the runner: MinIO is trusted, self-authored code with no
-exposure to arbitrary/untrusted input, so the lighter, faster, cheaper LXC
-container is fine. The runner executes arbitrary workflow code and stays in
-a full VM for the stronger KVM-level isolation — see the reasoning in the
-troubleshooting notes.
-
-**CT 200's network address is statically pinned, not DHCP** (`ip=<addr>/24,
-gw=<gateway>` in `minio-lxc-init.sh`, the same approach nodes already use
-via cloud-init) — see the DHCP-drift entry in Troubleshooting notes for why
-this changed.
-
-**The same MinIO bucket also doubles as an internal binary mirror.** A
-`tools/` prefix in the `iac-proxmox-lab-tfstate` bucket (public-download,
-`mc anonymous set download local/tools`) holds binaries that can't be
-fetched directly from the runner due to regional blocks — currently the
-Terraform CLI itself (`terraform_<version>_linux_amd64`, downloaded once
-over a VPN and pushed via `mc cp`) and MinIO client. See the HashiCorp
-distribution note in [Troubleshooting notes](#troubleshooting-notes-things-that-actually-broke)
-below.
-
-### Shared storage (`bare-pve`, NFS)
-
-`scripts/shared-storage-creation.sh` sets up an NFS export
-(`/srv/shared-storage`) on `bare-pve` for ISO/template/backup content that
-both cluster nodes should see identically, without copying files between
-them by hand. Since `nexus-cluster`'s `/etc/pve/storage.cfg` is a
-cluster-wide file, `pvesm add` only needs to run once (from either node) to
-register it on both:
-
-```bash
-pvesm add nfs shared-storage \
-  --server 192.168.100.30 \
-  --export /srv/shared-storage \
-  --content iso,vztmpl,backup,snippets,images
-```
-
-This is a separate, manual step from the script on purpose — the script
-only prepares the NFS server side (per-node action), while `pvesm add` is a
-cluster-wide action that only makes sense to run once, not per-node.
+nodes bare metal.** `bare-pve` (`.30`) holds storage and anything that must
+not go down (MinIO, CI runner, immich-node); `pve-rog` (`.20`) keeps the
+"extra CPU/RAM for peak load" role and also hosts `workstation` — a
+GUI-installed desktop VM used as an actual personal computer (see
+[Other environments](docs/architecture.md#other-environments)). The full
+story of how both nodes ended up bare metal (one of them was nested Proxmox
+on a laptop for a while) is in [docs/history.md](docs/history.md); the full
+reasoning behind the cluster topology, the QDevice/Tailscale setup, the
+physical LAN quirks, and the state-backend placement is in
+[docs/architecture.md](docs/architecture.md#architecture-in-depth).
 
 ## Stack
 
 - **Proxmox VE 9.2** — hypervisor, clustered (`nexus-cluster`, 2 nodes +
-  QDevice), both nodes bare metal. `bare-pve` came up on 9.2 from the
-  start; `pve-rog` was rebuilt onto 9.2 from a clean bare-metal install
-  rather than in-place upgraded from its earlier nested 8.4 setup — see
-  Troubleshooting notes for why a clean rebuild won over `dist-upgrade`
-  here.
+  QDevice), both nodes bare metal
 - **Terraform** + [`bpg/proxmox`](https://github.com/bpg/terraform-provider-proxmox)
   provider (chosen over `Telmate/proxmox` — more actively maintained, fuller
   API coverage)
 - **cloud-init** — VM bootstrapping (user creation, SSH keys, package install)
   for every environment except `workstation/`, which is installed by hand
-  through the GUI installer instead (see [Other environments](#other-environments))
+  through the GUI installer instead (see
+  [environments/workstation/README.md](environments/workstation/README.md))
 - **Ubuntu 24.04 (Noble) cloud image** — golden template, cloned per VM
 - **MinIO** (LXC, systemd daemon, no Docker) — S3-compatible Terraform state
-  backend for both root modules, independent of the runner and the node
+  backend for every root module, independent of the runner and the node
   VMs; also serves as an internal binary mirror for tools blocked by
-  regional restrictions
+  regional restrictions (see [docs/architecture.md](docs/architecture.md#state-backend-lives-off-both))
 - **Ansible** — post-provision configuration, delegated to
   [`swarm-lab`](../swarm-lab)'s playbook via a pinned git tag (see
   [CI/CD](#cicd) below)
 - **Docker Compose + systemd** — `immich-node`'s provisioning model,
-  deliberately not swarm (see [Other environments](#other-environments)
-  above and that environment's own README)
+  deliberately not swarm (see
+  [environments/immich-node/README.md](environments/immich-node/README.md))
 - **SPICE (`qxl2`) + a local kiosk session** — `workstation/`'s display
-  model: paravirtualized two-head video plus a minimal X/openbox kiosk
-  running on the Proxmox host itself, so the VM shows up directly on
-  physical monitors without a separate viewing machine (see that
-  environment's own README)
+  model (see [environments/workstation/README.md](environments/workstation/README.md))
 
 ## Repo layout
 
 Standard `modules/` + `environments/` split. `modules/proxmox-vm` is the one
 reusable building block — a single cloned VM with a cloud-init snippet — and
-every root module except `environments/workstation` (see below) calls it.
-The module owns no backend and no provider config; each environment
-configures those independently, which is what actually enforces the
-state/lifecycle separation described below (not just a folder convention).
+every root module except `environments/workstation` calls it (see
+[docs/architecture.md#other-environments](docs/architecture.md#other-environments)
+for why `workstation` is the exception).
 
 ```
 modules/
@@ -347,200 +102,45 @@ modules/
     ├── versions.tf                   #   required_version + required_providers
     ├── outputs.tf                    #   vm_id, ipv4_addresses
     ├── README.md
-    └── templates/user-data.yml.tpl   #   cloud-init template (users, packages, guest agent,
-                                      #   wake-ping to .3 for the MT-PON-AT-4 L2 quirk, optional
-                                      #   write_files/extra runcmd for environment-specific
-                                      #   provisioning — see below)
+    └── templates/user-data.yml.tpl   #   cloud-init template
 
 environments/
 ├── nodes/                            # ROOT MODULE — prod/stage/dev nodes (in CI)
-│   ├── main.tf                       #   for_each over var.nodes -> module "node"
-│   ├── variables.tf                  #   incl. the "nodes" topology map
-│   ├── outputs.tf                    #   node_ids, node_ips, inventory_path
-│   ├── providers.tf
-│   ├── backend.tf                    #   S3 (MinIO/CT 200)
-│   ├── terraform.tfvars.example
-│   └── templates/inventory.tpl       #   ansible inventory template (used only here)
 ├── runner/                           # ROOT MODULE — CI runner, own state/lifecycle
-│   ├── main.tf                       #   single module "ci_runner" call, dhcp,
-│   │                                 #   extra_packages/extra_runcmd/write_files for
-│   │                                 #   runner-specific prerequisites (see below)
-│   ├── variables.tf
-│   ├── outputs.tf                    #   ci_runner_ip
-│   ├── providers.tf
-│   ├── backend.tf                    #   S3 (MinIO/CT 200) — migrated off local, see
-│   │                                 #   Troubleshooting notes for why and how
-│   └── terraform.tfvars.example
 ├── poly-nodes/                       # ROOT MODULE — infra for poly-ci, manual apply, WIP
-│   └── ...                           #   same shape as nodes/; clones from VM 9001 on
-│                                     #   hdd-storage (currently flaky — see "Other environments")
 ├── minecraft-node/                   # ROOT MODULE — isolated Minecraft node, manual apply
-│   ├── network.tf                    #   isolated vmbr1 bridge + NAT/DROP iptables rules
-│   └── ...                           #   short-lived/situational, not part of the core lab
 ├── immich-node/                      # ROOT MODULE — Immich (docker compose), manual apply
-│   ├── main.tf                       #   module "node" call + null_resource for the raw
-│   │                                 #   recovery-disk passthrough (see above)
-│   ├── README.md                     #   cpu_type / recovery-ro details specific to this env
-│   └── ...                           #   same base shape as nodes/
+│   └── README.md                     #   cpu_type / recovery-ro details specific to this env
 └── workstation/                      # ROOT MODULE — GUI-installed desktop VM(s), manual apply
-    ├── main.tf                       #   standalone proxmox_virtual_environment_vm (no
-    │                                 #   modules/proxmox-vm, no clone{}/cloud-init) + a
-    │                                 #   null_resource per USB device (same pattern as
-    │                                 #   immich-node's raw-disk bind, see above)
-    ├── README.md                     #   qxl2 vs virtio-gl vs GPU passthrough, ISO-vs-flash-
-    │                                 #   drive boot story, kiosk script mechanics
-    └── ...                           #   own backend/state; ISO must already be uploaded to
-                                      #   the datastore before apply, Terraform doesn't fetch it
+    └── README.md                     #   qxl2 vs virtio-gl vs GPU passthrough, kiosk mechanics
 
 .github/workflows/pipeline.yml        # provision (terraform, environments/nodes) + deploy (ansible)
 scripts/
-├── install-proxmox-with-libvirt.sh   # HISTORICAL — used to stand up pve-rog as a nested
-│                                     #   Proxmox instance on the G750JX's host OS. pve-rog is
-│                                     #   bare metal now; kept in the repo for the record and in
-│                                     #   case a future node is ever stood up nested again, but
-│                                     #   not part of the current provisioning path for any live
-│                                     #   node. See Troubleshooting notes for the incidents this
-│                                     #   script's guards were written against.
+├── install-proxmox-with-libvirt.sh   # HISTORICAL — see docs/history.md
 ├── proxmox-init.sh                   # Proxmox-side (either node): terraform user/role/token,
 │                                     #   golden image, thin-pool autoextend threshold
-├── minio-lxc-init.sh                 # Proxmox-side (bare-pve): MinIO LXC (state backend), NOT
-│                                     #   terraform-managed, statically-addressed
-├── shared-storage-creation.sh        # Proxmox-side (bare-pve): NFS export prep for the
-│                                     #   cluster-wide shared-storage datastore (see
-│                                     #   Architecture above)
-└── desktop-kiosk-setup.sh            # Proxmox-side (pve-rog, for environments/workstation):
-                                      #   turns the host itself into a local SPICE kiosk
-                                      #   (minimal X/openbox, autologin, remote-viewer loop) so
-                                      #   the desktop VM displays on the laptop's own external
-                                      #   monitors — see that environment's own README
+├── minio-lxc-init.sh                 # Proxmox-side (bare-pve): MinIO LXC (state backend)
+├── vault-lxc-init.sh                 # Proxmox-side (bare-pve): Vault LXC, manual unseal
+├── shared-storage-creation.sh        # Proxmox-side (bare-pve): NFS export prep
+├── desktop-kiosk-setup.sh            # Proxmox-side (pve-rog): local SPICE kiosk for workstation
+└── register-github-runner.sh         # Registers the GitHub Actions runner agent on ci-runner
 ```
 
-**What changed vs. the original flat layout**, and why:
-
-- `nodes.tf` + `runner/runner.tf`'s VM/cloud-init resources merged into one
-  module, `modules/proxmox-vm` — they were near-identical resource blocks
-  (VM + cloud-init file) with different inputs. Duplicating them was the
-  actual blocker for the "reusable module, variable node count" item that
-  used to sit in Status/TODO; now it's just `for_each` over the module.
-- `cloud-init/user-data.yml.tpl` moved inside the module
-  (`modules/proxmox-vm/templates/`) — it's an implementation detail of "how
-  a VM is built," not something either environment should reach into
-  directly.
-- `templates/inventory.tpl` moved into `environments/nodes/` — only that
-  one root module ever uses it; keeping it at the repo root implied it was
-  shared, which it wasn't.
-- Fixed a latent bug in the process: the old `runner/runner.tf` called
-  `templatefile()` without a `hostname` value even though the template
-  requires `${hostname}` — this would fail at apply time. The module now
-  defaults `hostname` to the VM name.
-- `environments/nodes/outputs.tf` is new — the old repo-root module had no
-  outputs at all (`runner/` did). Now both expose `vm_id`/IP info instead
-  of requiring a state-file grep to check what got provisioned.
-- `backend.tf`'s S3 `key` changed from `terraform.tfstate` to
-  `nodes/terraform.tfstate` to make room for other environments in the same
-  bucket later — **this requires `terraform init -migrate-state` (or a
-  manual state copy in MinIO) when adopting this layout on an existing
-  state file**, it's not a no-op rename. Performed by hand on this repo's
-  own state during PR #23. The same `nodes/` vs `runner/` key-namespacing
-  later made it straightforward to migrate `environments/runner/`'s state
-  into the same bucket too — see Troubleshooting notes, and to add
-  `poly-nodes/`, `minecraft-node/`, `immich-node/`, and `workstation/`
-  under their own keys later.
-- Moving the VM/cloud-init resources into `modules/proxmox-vm` also meant
-  they picked up new state addresses (`module.node["..."]....` instead of
-  the old flat `proxmox_virtual_environment_vm.node["..."]`). Adopting this
-  layout on existing state needs `moved` blocks mapping the old addresses
-  to the new ones — otherwise Terraform reads the rename as
-  destroy-old/create-new and will happily recreate every live VM. Add them
-  temporarily, `apply` once, then they can be deleted. This is exactly what
-  was done here — the blocks were added, applied once with no destroy/create
-  in the plan, then removed.
-- `modules/proxmox-vm` gained four optional inputs — `extra_packages`,
-  `extra_runcmd`, `write_files`, `docker_group` — so environment-specific
-  provisioning (currently the runner, minecraft-node, and immich-node use
-  some subset of this) stays out of the shared base template.
-  `environments/nodes` never sets these, so node VMs are unaffected; see
-  [Runner host prerequisites](#runner-host-prerequisites-automated-via-cloud-init)
-  below for how the runner uses them.
-- `modules/proxmox-vm` gained a fifth optional input, `cpu_type` (default
-  `kvm64`, the same conservative baseline the module always used
-  implicitly before this was exposed). Added for `immich-node`, which
-  needs `cpu_type = "host"` — the default baseline lacks CPU flags
-  (`sse4_2`/`popcnt`/`avx2`) that Immich's machine-learning container
-  requires, and it restart-loops without them. Every other environment
-  keeps the old implicit default unchanged; only `immich-node` sets this
-  explicitly. See that environment's own README for the full story, and
-  the CPU-type entry in Troubleshooting notes below for the general
-  lesson.
-- Both VM resources gained an explicit `serial_device`/`vga` block (matching
-  what the golden image already had), so `qm terminal <vmid>` now shows a
-  real console instead of a blank screen — closes a long-standing diagnosis
-  gap; see Troubleshooting notes.
-- `proxmox-init.sh` now also pins `activation { thin_pool_autoextend_threshold = 80 }`
-  in `/etc/lvm/lvm.conf`, so a future host rebuild doesn't silently drop this
-  guard — see the thin-pool exhaustion entries in Troubleshooting notes for
-  why it's there.
-- `minio-lxc-init.sh` now assigns CT 200 a static IP instead of DHCP — see
-  the DHCP-drift entry in Troubleshooting notes for why.
-- `modules/proxmox-vm` gained `network_bridge` (default `vmbr0`, overridable
-  — e.g. `vmbr1` for `minecraft-node`'s isolated segment) and per-VM
-  `datastore_id_disk`/`disk_size` inputs, to support `poly-nodes` and
-  `minecraft-node` without forking the module.
-- `proxmox-init.sh`'s `TerraformProv` role dropped `VM.Monitor` from its
-  privilege list — that privilege no longer exists in Proxmox VE 9.x (see
-  the role table and Troubleshooting notes below).
-- `scripts/shared-storage-creation.sh` added — NFS export prep on `bare-pve`
-  for the cluster-wide `shared-storage` datastore (see
-  [Architecture](#shared-storage-bare-pve-nfs) above).
-- The base cloud-init `runcmd` (shared by every environment via
-  `modules/proxmox-vm/templates/user-data.yml.tpl`) now retries a ping to
-  `192.168.100.3` a few times right after the network stage — works around
-  a known MT-PON-AT-4 quirk where a new host's MAC isn't learned by devices
-  on the far side of the ONT until the host itself sends outbound traffic;
-  see the corresponding Troubleshooting notes entry. Harmless no-op on
-  `minecraft-node` (isolated `vmbr1` segment has no route to `.3`; the
-  command is wrapped so a failure there doesn't block the rest of `runcmd`).
-- `environments/immich-node` added — Immich via `docker compose`, own root
-  module, own state key. Introduced the raw-disk-passthrough pattern (see
-  [above](#the-raw-disk-passthrough-pattern-nullresource--local-exec)) and
-  the `cpu_type` module input. Not wired into `pipeline.yml`, same as
-  `poly-nodes`/`minecraft-node`.
-- `environments/workstation` added — a GUI-installed Ubuntu Desktop VM on
-  `pve-rog`, own root module, own state key, deliberately **not** built on
-  `modules/proxmox-vm` (see [Other environments](#other-environments)
-  above). Reuses the raw-passthrough `null_resource` + SSH pattern for
-  real USB devices (same root cause as the raw-disk pattern — the Proxmox
-  API's "only root can set real-device config" restriction), and adds
-  `scripts/desktop-kiosk-setup.sh` for turning the host itself into a
-  local SPICE client. Not wired into `pipeline.yml`, applied manually like
-  `poly-nodes`/`minecraft-node`/`immich-node`.
-- `pve-rog` rebuilt from a nested Proxmox instance (running inside
-  libvirt/KVM on the G750JX's host OS) onto bare metal, matching `bare-pve`.
-  Cluster renamed from `lab-cluster` to `nexus-cluster` and the bare-metal
-  node (`.30`) renamed from `pve` to `bare-pve` at the same time, mostly for
-  clarity now that neither node is nested and the old `pve`/`pve-rog` naming
-  no longer signaled anything about which one was virtualized.
-  `scripts/install-proxmox-with-libvirt.sh` is kept for the historical
-  record (and in case nesting is ever needed again for a future node) but
-  is no longer part of provisioning any currently-live node — see the
-  script's own note in [Repo layout](#repo-layout) above.
+Full detail on every one of the six manually-applied environments, the
+module's optional inputs, and everything that changed vs. the original flat
+layout (and why) lives in [docs/architecture.md](docs/architecture.md) and
+[docs/history.md](docs/history.md) — kept out of this file so the root
+README stays a map, not the whole territory.
 
 ## Quickstart
 
 ### 1. Stand up a Proxmox node
 
-Both cluster nodes are bare metal now — install Proxmox VE 9.2 directly on
-the target hardware, disable the enterprise repos in favor of
-`pve-no-subscription` (default install points at a subscription-only repo
-that 401s on `apt update` otherwise — on 9.x this is a `deb822`-format
-`.sources` file, not the old `.list`).
-
-`vmbr0` binds straight to the physical NIC at install time — no bridging
-dance needed, unlike the old nested setup (see
-`scripts/install-proxmox-with-libvirt.sh`'s own note in
-[Repo layout](#repo-layout) if you ever need to stand up a node nested
-again, e.g. for a quick throwaway test environment; it's not part of the
-current path for `pve-rog` or `bare-pve`).
+Both cluster nodes are bare metal — install Proxmox VE 9.2 directly on the
+target hardware, disable the enterprise repos in favor of
+`pve-no-subscription` (see
+[docs/troubleshooting.md](docs/troubleshooting.md#apt-enterprise-401)
+for the exact `deb822`-format fix on 9.x).
 
 ### 2. Initialize Proxmox for Terraform (on either node)
 
@@ -548,29 +148,16 @@ current path for `pve-rog` or `bare-pve`).
 ssh root@<proxmox-ip> 'bash -s' < scripts/proxmox-init.sh
 ```
 
-Creates the `terraform@pve` user, a scoped `TerraformProv` role, an API
-token, and the `ubuntu-cloud-template` (VM 9000) golden image. Also pins
-`/etc/resolv.conf` (Proxmox's own DNS otherwise doesn't survive a fresh
-install), enables the `snippets` content type on the `local` datastore
-(needed for cloud-init user-data uploads), and sets
-`activation { thin_pool_autoextend_threshold = 80 }` in `/etc/lvm/lvm.conf`
-so a filling thin pool surfaces a warning well before it hits 100% and
-starts throwing I/O errors at every VM on the host (see Troubleshooting
-notes). Idempotent.
+Creates the `terraform@pve` user, a scoped `TerraformProv` role (full
+privilege list and reasoning in
+[docs/architecture.md#terraformprov-role](docs/architecture.md#terraformprov-role)),
+an API token, and the `ubuntu-cloud-template` (VM 9000) golden image. Also
+pins `/etc/resolv.conf`, enables the `snippets` content type on the `local`
+datastore, and sets `activation { thin_pool_autoextend_threshold = 80 }` in
+`/etc/lvm/lvm.conf`. Idempotent.
 
-The API token secret is printed to `/root/terraform-token.json` on first
-run — copy it into `terraform.tfvars`, then consider deleting that file from
-the host. (Plaintext-on-disk is an acceptable trade-off for a local lab; a
-production setup would push this into Vault or similar instead — not yet
-done here. The same trade-off applies to any secret injected via cloud-init
-— e.g. `minecraft-node`'s playit.gg key — since cloud-init snippets are
-readable from the Proxmox datastore/API.)
-
-**SSH key auth is required, not just API access.** The `bpg/proxmox`
-provider uploads cloud-init snippets over SSH (not the REST API), so
-`root@<proxmox-ip>` needs to accept your key, and that key needs to be
-loaded in `ssh-agent` — a password-only root login (the Proxmox installer
-default) will fail here even though everything else works over the API.
+**SSH key auth is required, not just API access** — the `bpg/proxmox`
+provider uploads cloud-init snippets over SSH:
 
 ```bash
 ssh-copy-id -i ~/.ssh/<your-key>.pub root@<proxmox-ip>
@@ -583,20 +170,16 @@ ssh-add ~/.ssh/<your-key>
 MINIO_ROOT_PASSWORD='<pick-a-password>' ssh root@<proxmox-ip> 'bash -s' < scripts/minio-lxc-init.sh
 ```
 
-Creates CT 200, an unprivileged LXC container, and runs MinIO inside it as a
-systemd service, on a statically-assigned IP (not DHCP — see Troubleshooting
-notes for why). Not a Terraform resource by design — see
-[Architecture](#state-backend-lives-off-both) above. Prints the S3 endpoint
-and console URL on success.
+Creates CT 200 (MinIO, statically addressed — see
+[docs/architecture.md#state-backend-lives-off-both](docs/architecture.md#state-backend-lives-off-both)
+for why it's an LXC, not a Terraform resource). Then, via the printed
+console URL, create a bucket named `iac-proxmox-lab-tfstate` and confirm
+`endpoints.s3` in every environment's `backend.tf` matches the static IP.
 
-Then, via the printed console URL, create a bucket named
-`iac-proxmox-lab-tfstate` and confirm `endpoints.s3` in every environment's
-`backend.tf` match the static IP set in `minio-lxc-init.sh`.
-
-**Optional, one-time:** if the runner will need `terraform`/`mc` binaries
-(it does — see [Runner host prerequisites](#runner-host-prerequisites-automated-via-cloud-init)
-below), create a `tools/` prefix in the same bucket and make it
-anonymously downloadable:
+**Optional, one-time:** create a `tools/` prefix in the same bucket for the
+runner's `terraform`/`mc` binaries (needed because HashiCorp's and MinIO's
+own distribution paths are unreachable from this network — see
+[docs/troubleshooting.md](docs/troubleshooting.md#hashicorp-cli-blocked)):
 
 ```bash
 mc alias set local http://<minio-ip>:9000 <minio-user> <minio-password>
@@ -606,43 +189,28 @@ mc anonymous set download local/tools
 
 ### 4. (Optional) Cluster the nodes and add a QDevice arbiter
 
-Only relevant once more than one Proxmox node exists. From the more stable
-node:
+Only relevant once more than one Proxmox node exists.
 
 ```bash
-pvecm create nexus-cluster
+pvecm create nexus-cluster                                  # on the more stable node
+pvecm add <first-node-ip> --link0 <this-node-ip>             # on the second node
 ```
 
-From the second node — **`--link0` is not optional in practice**, see
-Troubleshooting notes:
+**`--link0` is not optional in practice** — see
+[docs/troubleshooting.md](docs/troubleshooting.md#pvecm-add-link0-split)
+for the split-brain this causes otherwise.
+
+Then, for quorum that survives either node going down:
 
 ```bash
-pvecm add <first-node-ip> --link0 <this-node-ip>
-```
-
-Then, for a 2-node cluster (quorum survives either node going down,
-not just neither), set up a QDevice arbiter on a third always-on-ish
-machine that doesn't need to run guests:
-
-```bash
-# on the arbiter machine
-sudo apt install corosync-qnetd
-
-# on either cluster node, once corosync-qdevice is installed on BOTH nodes
-apt install -y corosync-qdevice   # on both pve-rog and bare-pve
+sudo apt install corosync-qnetd            # on the arbiter machine
+apt install -y corosync-qdevice            # on both pve-rog and bare-pve
 pvecm qdevice setup <arbiter-ip>
 ```
 
-`pvecm qdevice setup` needs root SSH into the arbiter — see Troubleshooting
-notes for the SSH-key/`PermitRootLogin` dance this requires on a normal
-desktop/laptop that doesn't allow root login by default, and for why it's
-safe (and worth it) to revert `PermitRootLogin` back afterward. If the
-arbiter is only reachable over Tailscale at the time (e.g. it's traveling,
-not on the LAN) — see the QDevice/Tailscale entry in Troubleshooting notes
-for the extra step this needs (the node running `qdevice setup` must itself
-be a tailnet member) and the chicken-and-egg gotcha (`qdevice remove`/
-`setup` both refuse to run with any cluster node offline, so recovering
-quorum on the *other* node has to happen first).
+See [docs/architecture.md](docs/architecture.md#architecture-in-depth) for
+the SSH/`PermitRootLogin` dance this needs and the Tailscale fallback when
+the arbiter isn't on the LAN.
 
 ### 5. (Optional) Register cluster-wide shared storage (`bare-pve`)
 
@@ -654,8 +222,8 @@ pvesm add nfs shared-storage \
   --content iso,vztmpl,backup,snippets,images
 ```
 
-See [Shared storage](#shared-storage-bare-pve-nfs) above for why the second
-command is separate and cluster-wide rather than folded into the script.
+See [docs/architecture.md#shared-storage](docs/architecture.md#shared-storage)
+for why the second command is separate and cluster-wide.
 
 ### 6. Provision the nodes
 
@@ -668,9 +236,9 @@ terraform init
 terraform apply -parallelism=1
 ```
 
-`-parallelism=1` is not cosmetic — see the thin-pool/IO-contention entry in
-troubleshooting notes below for why concurrent full-clones on `pve-rog`
-have historically been unreliable.
+`-parallelism=1` is not cosmetic — see
+[docs/troubleshooting.md](docs/troubleshooting.md#concurrent-clones-unreliable)
+for the disk-contention/timeout story.
 
 ### 7. (Optional, manual, rare) Provision the CI runner
 
@@ -684,851 +252,48 @@ terraform apply
 ```
 
 Always run this by hand, never from the self-hosted runner's own CI job —
-that's the whole point of the split. See
-[Architecture](#two-independent-root-modules-on-purpose). State lives in the
-same MinIO bucket as the nodes' state, under a separate `runner/` key — see
-Troubleshooting notes for why a local backend here turned out to still be a
-single point of failure (laptop loss, not just Proxmox loss).
+see [docs/architecture.md#two-independent-root-modules](docs/architecture.md#two-independent-root-modules)
+for the incident that made this a hard rule.
 
 ### 8. (Optional, manual, as-needed) poly-nodes / minecraft-node / immich-node / workstation
 
-Same pattern as steps 6/7 — `cd` into `environments/poly-nodes/`,
-`environments/minecraft-node/`, `environments/immich-node/`, or
-`environments/workstation/`, copy the `.tfvars.example`, `terraform init`,
-`terraform apply`. None are wired into `pipeline.yml`; `poly-nodes`/
-`minecraft-node` are meant to be stood up, used, and torn down on demand
-rather than staying live like `nodes/`, while `immich-node` and
-`workstation` are persistent single VMs (like `runner/`) that just happen
-to be applied manually rather than from CI. See
-[Other environments](#other-environments) above for what each one is.
-`immich-node` also needs a short manual pass after the first `apply` — see
-that environment's own README for the recovery-disk mount and
-`docker compose` setup steps not covered by Terraform. `workstation` needs
-an ISO already uploaded to the target datastore *before* the first
-`apply` (Terraform doesn't fetch it), and a full manual OS install through
-the SPICE console afterward — see
-[`environments/workstation/README.md`](environments/workstation/README.md)
-for the complete sequence, including the host-side kiosk setup
-(`scripts/desktop-kiosk-setup.sh`) needed to actually view it on physical
-monitors.
-
-### Runner host prerequisites (automated via cloud-init)
-
-Everything the CI job (`pipeline.yml`) needs on top of the golden image's
-baseline (SSH user, `qemu-guest-agent`) is now provisioned automatically by
-`environments/runner/main.tf`, via the module's `extra_packages`,
-`extra_runcmd`, `write_files`, and `docker_group` inputs — no manual pass
-after `terraform apply` is needed anymore. A runner recreate comes up ready
-in one shot (roughly 3–4 minutes, most of it spent on `apt-get install` for
-`docker.io`/`ansible` and their dependency trees).
-
-What gets installed and why:
-
-- **`~/.terraformrc` with a network mirror** — direct access to
-  `registry.terraform.io` from this network isn't reliable enough for
-  unattended CI runs, so provider installation goes through a mirror
-  instead:
-
-  ```hcl
-  provider_installation {
-    network_mirror {
-      url     = "https://terraform-mirror.yandexcloud.net/"
-      include = ["registry.terraform.io/*/*"]
-    }
-    direct {
-      exclude = ["registry.terraform.io/*/*"]
-    }
-  }
-  ```
-
-  Written via `write_files`, owned by `root:root` at write time and
-  `chown`'d to `ubuntu:ubuntu` afterward in `runcmd` — see the write_files
-  ordering note in Troubleshooting notes for why it can't be owned by
-  `ubuntu` directly at write time.
-
-- **`terraform` CLI itself** — *not* installed via HashiCorp's apt repo or
-  GitHub releases; both are unreachable from this network (regional
-  distribution block — see Troubleshooting notes). Pulled instead from the
-  self-hosted MinIO `tools/` bucket:
-
-  ```bash
-  curl -o /usr/local/bin/terraform http://<minio-ip>:9000/tools/terraform_<version>_linux_amd64
-  chmod +x /usr/local/bin/terraform
-  ```
-
-  Getting a working binary into that bucket in the first place is a manual,
-  one-time step (download over VPN, `mc cp` into `tools/` — see step 3
-  above); bumping the Terraform version means repeating that upload and
-  updating the filename in `environments/runner/main.tf`'s `extra_runcmd`.
-  The MinIO IP baked into that URL is now the pinned static address, so it
-  no longer needs re-syncing after every CT restart — see the DHCP-drift
-  entry in Troubleshooting notes for the incident that made this necessary.
-
-- **`docker.io`, `curl`, `jq`, `ansible`, `unzip`, `gnupg`,
-  `software-properties-common`, `lsb-release`** — `docker.io` and `ansible`
-  for the `deploy` job's playbook run against `swarm-lab`; the rest are
-  general-purpose CI utilities.
-- **MinIO client (`mc`)** — for poking at the state bucket (list objects,
-  sanity checks) from the runner without going through the Proxmox host.
-  Pulled from `https://dl.min.io/aistor/mc/release/linux-amd64/mc` — note
-  the `aistor` path, not the older `client/mc/release/...` path, which now
-  serves an HTML redirect instead of the binary (see Troubleshooting
-  notes).
-
-Quick check after any runner recreate:
-
-```bash
-ssh ubuntu@<runner-ip> 'which terraform ansible ansible-playbook ansible-galaxy docker mc'
-```
-
-All six should resolve immediately — no manual install pass required.
+Same pattern as steps 6/7 — `cd` into the environment, copy the
+`.tfvars.example`, `terraform init`, `terraform apply`. None are wired into
+`pipeline.yml`. `immich-node` and `workstation` each need a manual pass
+after the first `apply` that Terraform can't reach (guest-OS config, GUI
+install) — see their own READMEs:
+[environments/immich-node/README.md](environments/immich-node/README.md),
+[environments/workstation/README.md](environments/workstation/README.md).
 
 ## CI/CD
 
 `.github/workflows/pipeline.yml` runs two jobs on the self-hosted runner,
 triggered on `workflow_dispatch` or a push to `main` touching
-`environments/nodes/**` or `modules/**` (the latter because
-`environments/nodes` depends on `modules/proxmox-vm` — a module change
-needs the same `apply` as an environment change; see
-[Architecture](#two-independent-root-modules-on-purpose)). Pushes under
-`environments/runner/**`, `environments/poly-nodes/**`,
-`environments/minecraft-node/**`, `environments/immich-node/**`, and
-`environments/workstation/**` deliberately do **not** trigger this
-workflow — the runner is applied by hand, never from its own CI job, and
-`poly-nodes`/`minecraft-node`/`immich-node`/`workstation` are all
-manually-applied environments, not persistent CI-managed infra like
-`nodes/`.
+`environments/nodes/**` or `modules/**`:
 
-1. **provision** — `terraform apply` against the `environments/nodes` root
-   module, producing `environments/nodes/inventory.ini` via the `local_file`
-   resource and uploading it as a build artifact.
+1. **provision** — `terraform apply` against `environments/nodes`,
+   producing `environments/nodes/inventory.ini` and uploading it as a build
+   artifact.
 2. **deploy** — checks out this repo (for `inventory.ini`) alongside a
-   **pinned tag** of [`swarm-lab`](../swarm-lab) (currently `v0.3.3`, set via
-   `ref:` in the `Checkout swarm-lab` step), waits for every node to finish
-   booting (SSH reachable + `cloud-init status --wait`, see
-   Troubleshooting notes for why this step exists), then runs
+   **pinned tag** of [`swarm-lab`](../swarm-lab) (currently `v0.3.3`),
+   waits for every node to finish booting, then runs
    `swarm-lab/ansible/site.yml` against the freshly provisioned nodes.
 
 **Why a pinned tag instead of `main`:** the deploy job needs a stable,
-reproducible target — bumping the pin is a deliberate, visible action (a
-one-line diff in `pipeline.yml`) rather than silently picking up whatever
-`swarm-lab`'s `main` happens to be at trigger time. Bump the tag whenever
-`swarm-lab`'s `ansible/` tree (or anything else this pipeline depends on)
-changes in a way you want reflected here — see
-[swarm-lab's own README](../swarm-lab/README.md#cicd) for how its
-*application* images (nginx/python/nodejs/go) are versioned and deployed
-completely separately, by `swarm-lab`'s own CI, independent of this pin.
+reproducible target — bumping the pin is a deliberate, visible action
+rather than silently picking up whatever `swarm-lab`'s `main` happens to be
+at trigger time. See [swarm-lab's own README](../swarm-lab/README.md#cicd)
+for how its application images are versioned separately.
 
 Required repo/environment secrets: `PROXMOX_ENDPOINT`, `PROXMOX_API_TOKEN`,
 `VM_SSH_PUBLIC_KEY`, `CI_SSH_PUBLIC_KEY`, `CI_SSH_PRIVATE_KEY`,
-`MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `GH_RUNNER_PAT` (classic PAT with
-`repo` scope, or fine-grained with `Administration: read/write` on
-`swarm-lab` — used by the `github-runner` Ansible role to register a runner
-on the freshly provisioned `prod-node`).
-
-## The `TerraformProv` role, and why it needs what it needs
-
-Proxmox's privilege model is granular enough that the "obvious" set of
-privileges for VM management isn't sufficient for what Terraform actually
-does end to end. Arrived at the following list through trial and error
-against real `HTTP 403` responses, not from a single source of truth:
-
-| Privilege | Needed for |
-|---|---|
-| `VM.Allocate`, `VM.Clone` | creating/cloning VMs |
-| `VM.Config.*` | disk, CPU, memory, network, options, CD-ROM config |
-| `VM.Config.Cloudinit` | **separate** from `VM.Config.Options` — cloud-init parameter changes on the clone |
-| `VM.Config.HWType` | **separate** again — changing `vga`/`serial_device` (added when the serial console fix landed; without it, `apply` fails with `HTTP 403: Permission check failed (/vms/<id>, VM.Config.HWType)`) |
-| `VM.PowerMgmt`, `VM.Audit`, `VM.Console` | start/stop, status, agent queries |
-| `Datastore.AllocateSpace`, `Datastore.AllocateTemplate`, `Datastore.Audit` | disk provisioning |
-| `Datastore.Allocate` | **separate** from `AllocateSpace` — managing the datastore resource itself, needed when the provider enables the `snippets` content type on first file upload |
-| `SDN.Use` | cloning a VM with a network device attached to an SDN-managed bridge (introduced in Proxmox 8.x) |
-
-**`VM.Monitor` was removed in Proxmox VE 9.0** and no longer exists as a
-privilege — `pveum role add/modify` with it in the list now fails with
-`invalid privilege 'VM.Monitor'`. It isn't needed by anything this repo's
-Terraform does (VM creation/config/power/agent queries all use the
-privileges above); QEMU HMP monitor access, if ever needed, now goes through
-`Sys.Audit` (read-only commands) or `Sys.Modify` (state-changing ones)
-instead, and guest-agent-specific access has its own new
-`VM.GuestAgent.*` privileges. See the role-table diff in the git history
-for exactly what was dropped.
-
-Note that `qm set -scsiN <device>,ro=1` (used by `immich-node`'s raw-disk
-passthrough — see [above](#the-raw-disk-passthrough-pattern-nullresource--local-exec))
-and `qm set -usbN host=<vendorid:productid>` (used by `workstation`'s
-keyboard/mouse/webcam passthrough) both run as `root` over plain SSH, not
-through the Terraform provider's API token — so neither is bound by
-`TerraformProv`'s privilege list at all, and neither needs any addition to
-the table above.
-
-## Troubleshooting notes (things that actually broke)
-
-> Several entries below (the `br0`/`enp4s0` bridging, `vnet0` reattachment,
-> and nested-bridge jitter entries in particular) describe issues specific
-> to `pve-rog`'s earlier life as a nested Proxmox instance on the G750JX.
-> `pve-rog` has since been rebuilt onto bare metal and no longer has that
-> libvirt/KVM layer — these entries are kept for the historical record and
-> in case nesting is ever used again for a future node, but they don't
-> describe the cluster's current state.
-
-- **The self-hosted runner destroyed itself mid-`apply`.** Runner and nodes
-  originally lived in one root module. A change to the shared cloud-init
-  SSH-key template forced `# forces replacement` on every
-  `proxmox_virtual_environment_file`/`proxmox_virtual_environment_vm`
-  resource — including the runner VM the job was executing on. Terraform
-  began destroying the runner's own VM; the job got a shutdown signal
-  mid-destroy and never completed the recreate. Fixed by splitting the
-  runner into its own root module (`environments/runner/`, own state, own
-  backend, applied manually — see
-  [Architecture](#two-independent-root-modules-on-purpose)).
-
-- **State backend became unreachable after the above.** MinIO was running
-  *inside* the runner VM. Once the runner destroyed itself, every
-  subsequent `terraform init`/`plan`/`apply` failed with
-  `dial tcp ...: connect: no route to host` — the state backend and the
-  infrastructure it describes shared a single point of failure. Fixed by
-  moving MinIO to a standalone LXC container (CT 200) outside any
-  Terraform lifecycle — see [Architecture](#state-backend-lives-off-both)
-  and `scripts/minio-lxc-init.sh`. Considered running MinIO in Docker on
-  the Proxmox host directly, but Docker on the PVE host itself is not
-  recommended (interferes with Proxmox's own iptables/firewall management)
-  — an LXC container was the right level of isolation without that
-  conflict.
-
-- **Backend migration between S3 endpoints needs `-migrate-state` /
-  `-reconfigure`, and it *still* tries to reach the old endpoint first.**
-  Moving `backend.tf` from one MinIO endpoint to another isn't just an edit
-  and `terraform init` — the first `init` after the endpoint changes still
-  attempts to read the *previous* backend to figure out what needs
-  migrating, so if the old endpoint is dead (as after the incident above),
-  `-migrate-state` fails too on the first attempt. It only succeeds once
-  Terraform gives up trying to reach the dead old backend and falls back to
-  treating it as a fresh `-reconfigure`. Expect to run `terraform init`
-  more than once when changing backend endpoints under failure conditions.
-
-- **The runner's local backend was still a single point of failure — just a
-  different one than Proxmox dying.** `environments/runner/` originally
-  used `backend "local"` on the reasoning that it's applied rarely, by
-  hand, from a laptop. That's true, but the actual risk isn't "Proxmox
-  disappears" (in that case state is moot regardless of backend — the VMs
-  are gone too) — it's losing the laptop (or just its disk) while the
-  runner VM keeps running fine. The next `terraform apply` from a fresh
-  machine wouldn't see the existing runner in state and would attempt to
-  create a second one on top of it (MAC/name collision at best). Migrated
-  `environments/runner/backend.tf` to the same S3 (MinIO) bucket the nodes
-  already use, under a separate `runner/terraform.tfstate` key (mirroring
-  the `nodes/` key-namespacing from PR #23) — `terraform init
-  -migrate-state`, confirm "copy existing state to new backend" — so the
-  runner's state survives independently of any single laptop, matching why
-  MinIO itself was pulled out of the runner VM in the first place.
-  (A local backend does remain the *only* correct choice if MinIO itself
-  ever becomes a Terraform-managed resource in this same environment — a
-  bootstrap/chicken-and-egg problem, since state can't live in a bucket
-  the same `apply` is creating. Not the current setup; noted in case that
-  changes.)
-
-- **`terraform init -migrate-state` for the runner failed with `no route to
-  host` reaching MinIO — turned out to be an unrelated host-level network
-  incident, not a backend/credentials problem.** *(Historical — from
-  `pve-rog`'s nested-VM era.)* A hard power loss (dead laptop battery, no
-  UPS) took the whole nested Proxmox VM down; `dial tcp ...: connect: no
-  route to host` on the MinIO bucket was a downstream symptom of the VM
-  being unreachable, not anything wrong with the S3 backend config itself.
-  `-migrate-state` succeeded cleanly once the underlying network path was
-  restored.
-
-- **LVM thin pool exhaustion (`lvcreate` / `Cannot create new thin volume`)
-  during a clone.** Sum of virtual disk sizes across nodes, runner, and the
-  MinIO container comfortably exceeds the actual thin-pool size on
-  `pve-rog` — `pvesm status` showed `local-lvm` at 100% before this hit. An
-  orphaned VM from the runner self-destruct incident (disk never cleaned up
-  because the destroy never completed) was eating 20GB it no longer
-  needed. Fixed by removing the orphan (`qm destroy <id> --purge`) and
-  extending the thin pool into the volume group's free space
-  (`lvextend -l +100%FREE pve/data`). Worth periodically checking `lvs pve`
-  against `qm list` for orphaned disks whenever a `destroy`/`apply` gets
-  interrupted.
-
-- **Thin pool exhaustion recurred from natural growth, not an orphan this
-  time — and took down every VM plus the state backend simultaneously.**
-  With no orphaned disk left to blame, ordinary data growth across the
-  four thin volumes eventually refilled `pve/data` to 100% again on
-  `pve-rog`. This hit the pool while everything was live and running
-  unattended overnight: `dmesg` showed `EXT4-fs` write errors on every
-  VM's disk simultaneously (`I/O error 3 writing to inode ...`), and
-  `qm`/`pct` reboots issued in response all failed with
-  `VM quit/powerdown failed - got timeout` because the guest agent itself
-  couldn't respond over a filesystem that could no longer write. CT 200
-  (MinIO) took the worst of it — its journal aborted
-  (`EXT4-fs error: Journal has aborted`) badly enough that
-  `pct exec 200 -- systemctl status minio` failed outright with
-  `lxc-attach: Input/output error`, since even `exec`-ing a command
-  requires a working root filesystem. Recovered by: stopping every
-  VM/CT (`qm stop <id>`, `pct stop 200`) to halt further writes,
-  `lvextend -l +100%FREE pve/data` (there was still ~7GB of free space in
-  the volume group itself — `vgs pve`'s `VFree` — that the pool had never
-  been extended into), `pct fsck 200` to repair the aborted journal (ran
-  clean on the second pass), then starting everything back up. **Two
-  follow-ups landed as a direct result:** `scripts/proxmox-init.sh` now
-  sets `activation { thin_pool_autoextend_threshold = 80 }` in
-  `/etc/lvm/lvm.conf` so this surfaces as an early LVM warning instead of
-  a silent slide into I/O errors at 100%; and the underlying overcommit is
-  still real — `lvextend`'s own output after this incident
-  (`Sum of all thin volume sizes (<61.52 GiB) exceeds the size of thin
-  pool pve/data and the size of whole volume group (<59.50 GiB)`) means
-  the *ceiling* the pool can be extended to is now the actual bottleneck,
-  not a one-off cleanup. Recurs whenever real usage catches up again;
-  `pvesm status` / `lvs pve` should be the first thing checked on any
-  simultaneous multi-VM `io-error`, ahead of anything guest-side.
-
-- **A guest-side disk fill (not the hypervisor's thin pool) paused a VM
-  instead of crashing it, which looked like a crash at first.**
-  *(Historical — from `pve-rog`'s nested-VM era.)* A `docker compose`
-  workload (Immich, pre-`immich-node`, running directly on a physical
-  Ubuntu host, not a Proxmox guest) filled that host's own disk overnight;
-  the nested Proxmox VM (`pve-rog`, at the time still running inside
-  libvirt/KVM) whose qcow2 disk image lived on that same physical disk got
-  paused by libvirt/QEMU (not crashed) once the underlying filesystem had
-  no space left — `virsh list --all` showed it as `paused`, not
-  `shut off`, and `virsh resume proxmox-lab` brought it straight back with
-  no data loss or corosync resync needed. This cascaded into a real quorum
-  loss on `nexus-cluster` (the paused node's vote dropped out, leaving
-  `Expected votes: 2` / `Total votes: 1` on the remaining node — `pvecm
-  status` reported `Quorate: No`) — recovering the paused VM was the
-  actual fix, not anything cluster-config-side. Two lessons: (1) `paused`,
-  not `shut off` or absent from `virsh list --all`, is the first thing to
-  check when a guest is unexpectedly unreachable after a disk-full event
-  nearby — `virsh resume` is a much smaller hammer than assuming a rebuild
-  is needed; (2) this is the incident that motivated moving the Immich
-  workload onto its own dedicated, Proxmox-managed VM
-  (`environments/immich-node`) instead of a physical host's local disk
-  shared with unrelated guests — see
-  [Other environments](#other-environments) above.
-
-- **Recovering a lost QDevice arbiter mid-cluster required the arbiter to
-  join the tailnet, and `qdevice remove`/`setup` both refuse to run with
-  any node offline — a real chicken-and-egg.** With the QDevice arbiter
-  (normally on the LAN) reachable only over Tailscale at the time (away
-  from home), and one cluster node down for unrelated reasons (paused, see
-  the entry above), `pvecm qdevice remove` failed outright with
-  `All nodes must be online! Node <name> is offline, aborting` —
-  re-registering the arbiter's new address is *cluster-wide* config, so
-  Proxmox refuses to touch it while any member is unreachable. The
-  paused-VM fix above had to land first, purely by coincidence of both
-  problems existing at once; if the paused VM had instead been the one
-  needed to reach the arbiter, this would've been unrecoverable without
-  fixing that first regardless. Once quorum was back: `ssh
-  <tailscale-ip-of-arbiter>` from the bare-metal node failed outright
-  (`100% packet loss`) until that node *itself* joined the tailnet — a
-  subnet-router advertising the LAN range from a different machine doesn't
-  help here, since the arbiter needs to be dialed *from* the Proxmox host
-  for `qdevice setup`'s SSH step, not the other way around.
-  `tailscale up` accepting `--accept-routes=false` by default was correct
-  to leave alone — the bare-metal node already sits natively on the LAN
-  range some other tailnet member was also advertising, and accepting that
-  route in addition would just create a second, less predictable path to
-  the same subnet. Once the Proxmox host had its own tailnet identity,
-  `pvecm qdevice setup <tailscale-ip> --force` worked normally — the
-  `--force` was needed only because stale cert/config state from the
-  arbiter's previous LAN-based registration was still present.
-
-- **Concurrent full-clones on `pve-rog` are unreliable.** *(Root cause was
-  disk contention, not specifically nesting — worth re-checking now that
-  `pve-rog` is bare metal, but not yet revisited.)* `terraform apply` with
-  default parallelism clones all node VMs at once; on `pve-rog`'s
-  single-disk setup that meant heavy I/O contention — one clone finished in
-  ~2 minutes while a sibling clone took 15+ minutes and ultimately timed
-  out waiting for the QEMU guest agent (the VM was still mid-clone/mid-boot,
-  agent never got a chance to start). Fixed by using `terraform apply
-  -parallelism=1` for node provisioning — slower overall, but each clone
-  gets the disk to itself.
-
-- **`qemu-guest-agent` not running → 15-minute `apply` timeout.** The Ubuntu
-  cloud image ships the agent package but doesn't enable it by default.
-  Fixed by pushing a cloud-init snippet (now
-  `modules/proxmox-vm/templates/user-data.yml.tpl`) that installs and
-  enables it via `runcmd`, instead of relying on the base image.
-
-- **A heavy `packages:` list delays guest-agent startup enough to blow the
-  apply timeout anyway.** Once the runner started installing `docker.io`,
-  `ansible`, and friends via cloud-init's `packages:` list, the guest agent
-  (also only enabled via `runcmd`, which runs *after* the `packages:`
-  stage completes) didn't come up until the whole apt run finished —
-  10+ minutes, well past what looked like a hang. Fixed by never putting
-  heavy packages in `packages:` at all: only `qemu-guest-agent` is
-  installed there (fast, and gets the agent up within the first ~30
-  seconds of boot), everything else (`docker.io`, `ansible`, etc.) moves
-  to `runcmd` as an explicit `apt-get install`, which runs after the agent
-  is already live and reporting to Terraform.
-
-- **`write_files` failed silently with `KeyError: getpwnam(): name not
-  found: 'ubuntu'`.** cloud-init's `write_files` module runs in the
-  `init-network` stage, which happens *before* the `users` module creates
-  any configured users — so `owner: ubuntu:ubuntu` on a `write_files` entry
-  fails to `chown` a user that doesn't exist yet, and the whole module
-  aborts (the file is never written, only a warning is logged — easy to
-  miss). Fixed by always writing `write_files` entries as `root:root`, then
-  `chown`ing them to the real target owner in `runcmd` (which *does* run
-  after user creation) — see the `write_files`/`chown` pairing in
-  `modules/proxmox-vm/templates/user-data.yml.tpl`.
-
-- **`packages: None is not of type 'array'` — cloud-init schema validation
-  failure when `extra_packages` is empty.** Rendering `packages:` with the
-  Terraform `for` loop but zero items produces a bare `packages:` key with
-  nothing under it, which YAML reads as `null`, not an empty list — cloud-init's
-  schema requires an array. This affects any VM with `extra_packages = []`
-  (i.e. every node, since only the runner, minecraft-node, and immich-node
-  set packages). Fixed by wrapping the whole `packages:` block in
-  `%{ if length(extra_packages) > 0 ~}`, so the key is omitted entirely
-  rather than emitted empty.
-
-- **Multi-line `write_files` content breaks YAML if the block literal's
-  first line isn't indented.** Terraform's `indent(n, string)` indents every
-  line of a string *except the first* — so `content: |` followed directly by
-  `${indent(6, f.content)}` put the first line of the content at column 0
-  instead of the block's indent level, which either corrupts the whole
-  cloud-config parse (`could not find expected ':'`, with everything after
-  silently dropped as `empty cloud config`) or, in a milder case, just fails
-  schema validation for that one `write_files` entry. Fixed by adding the
-  indent manually before the interpolation: `      ${indent(6, f.content)}`
-  (6 literal spaces, since `indent()` only covers lines 2+).
-
-- **HashiCorp's Terraform CLI distribution (both
-  `apt.releases.hashicorp.com` and `releases.hashicorp.com`, which GitHub
-  Releases pages for Terraform link back to) is blocked for RU/BY IPs since
-  2022.** The `.terraformrc` network mirror already in use only covers
-  *provider* downloads via `terraform init`, not the CLI binary itself —
-  installing `terraform` via HashiCorp's apt repo or a direct GitHub
-  Releases URL both fail outright from this network. Worked around by
-  downloading the binary once over a VPN and re-hosting it on the
-  self-hosted MinIO instance (`tools/` prefix, anonymous-download bucket
-  policy); the runner's `extra_runcmd` pulls it from there instead. See
-  [Runner host prerequisites](#runner-host-prerequisites-automated-via-cloud-init).
-
-- **MinIO client's old download path
-  (`dl.min.io/client/mc/release/linux-amd64/mc`) now serves a small HTML
-  page instead of the binary**, following MinIO's AIStor rebrand — a plain
-  `curl -o mc <url>` without `-L` silently saves the HTML as if it were the
-  binary (141 bytes, `file` reports `HTML document`), and the resulting
-  "binary" fails with a bash parse error when executed. Fixed by switching
-  to the current path, `https://dl.min.io/aistor/mc/release/linux-amd64/mc`.
-
-- **Default `kvm64` CPU baseline silently breaks workloads compiled against
-  a newer instruction-set floor.** `modules/proxmox-vm` never explicitly
-  set `cpu.type` until `immich-node` needed it — meaning every VM had
-  implicitly been running `kvm64` (Proxmox's own default), a baseline
-  narrow enough to exclude `sse4_2`/`popcnt`/`avx2`. This went unnoticed
-  until Immich's machine-learning container (numpy/onnxruntime, built
-  against x86-64-v2) hit it and restart-looped with
-  `RuntimeError: NumPy was built with baseline optimizations: (X86_V2)
-  but your machine doesn't support`. Confirmed via
-  `cat /proc/cpuinfo | grep flags` inside the guest — genuinely absent, not
-  just unreported. Fixed by exposing `cpu_type` as a module input
-  (`modules/proxmox-vm/variables.tf`, still defaulting to `kvm64` for every
-  existing environment) and setting it to `host` specifically for
-  `immich-node`, which never migrates between hosts by design (bind-mounts
-  to a specific physical disk — see
-  [immich-node's README](environments/immich-node/README.md)), so the
-  usual migration-portability argument for a conservative baseline doesn't
-  apply there. **Not hot-pluggable** — a VM already running needs an
-  explicit `qm stop && qm start` (not a guest-side `reboot`) before a
-  changed `cpu.type` actually takes effect; `terraform apply` alone
-  rewrites the config but doesn't force this. Worth checking `cpu.type` on
-  any future VM whose workload turns out to depend on specific CPU
-  features (AES-NI, AVX, etc.) — the default here has always been the
-  conservative one, and it's opt-in per environment, not automatic.
-  `environments/workstation` hit the same non-hot-pluggable behavior for a
-  different field (`vga` type, not `cpu.type`) — see the next entry and
-  that environment's own README.
-
-- **Node VMs (and, before the serial console fix, the runner) had no usable
-  serial console.** The Terraform-managed VM resources didn't set an
-  explicit `serial_device`/`vga` block, unlike the golden image (VM 9000,
-  provisioned with `--serial0 socket --vga serial0` in `proxmox-init.sh`),
-  so `qm terminal <vmid>` connected but showed nothing useful — diagnosis
-  had to go through the Proxmox web UI's VNC console instead. Fixed by
-  adding the same `serial_device`/`vga` blocks to `modules/proxmox-vm`
-  (requires the `VM.Config.HWType` privilege — see the role table above).
-  Two remaining quirks worth knowing, not bugs:
-  - `qm terminal <vmid>` needs a real TTY on the client side — `ssh
-    <node> 'qm terminal <vmid>'` fails with `tcgetattr: Inappropriate
-    ioctl for device`; `ssh -t <node> 'qm terminal <vmid>'` works.
-  - Console login always rejects any password, by design — cloud-init only
-    sets `ssh_authorized_keys` for `ubuntu`, never a password, so the
-    account is locked for password auth. `Login incorrect` on the serial
-    console is expected; use SSH with the key instead. Reaching this login
-    prompt at all is actually a *good* sign — it means the VM booted fully
-    past init/network/multi-user.target.
-
-- **`user_account` block vs `user_data_file_id`.** These both generate
-  cloud-init user-data; setting `user_data_file_id` takes over entirely, so
-  the SSH user/key need to live in the snippet template, not in a separate
-  `user_account` block — leaving both in caused silent conflicts.
-
-- **Nested-bridge network jitter.** *(Historical — from `pve-rog`'s
-  nested-VM era; not applicable now that it's bare metal.)* Pinging the
-  nested Proxmox VM from a machine two hops away (over Wi-Fi → router →
-  host) showed heavy jitter (single-digit ms up to ~3s). Confirmed as a
-  Wi-Fi hop issue, not the bridge/nested-KVM setup — pinging from the
-  physical host itself was consistently sub-millisecond.
-
-- **`br0` loses its physical-NIC attachment after a nested-VM
-  teardown/host reboot.** *(Historical — from `pve-rog`'s nested-VM era.)*
-  `enp4s0` reverts to a standalone `auto` NM profile, leaving `br0` up but
-  carrier-less (`NO-CARRIER`) and the nested Proxmox VM completely
-  unreachable (`no route to host`, even though the VM itself boots fine —
-  its `vnet` interface just has nowhere to send traffic). Fixed with a
-  guard in `install-proxmox-with-libvirt.sh` that checks `br0`'s state and
-  `br0-port`'s attachment before every run and reattaches `enp4s0` if
-  needed — see the script for the exact `nmcli` checks. Running it may
-  briefly drop the current SSH session (expected, since `enp4s0` is being
-  reparented); just reconnect and re-run. Kept for reference in case
-  nesting is used again for a future node.
-
-- **`deploy` job hit a `dpkg` lock race and an intermittently unreachable
-  node, both traced to the same root cause: node VMs report "provisioned"
-  before cloud-init has actually finished.** `wait_for_ip_disabled = true`
-  on the node module means `terraform apply` returns as soon as the VM is
-  cloned, without waiting for SSH or cloud-init completion. On one run,
-  `dev-node` (cloned last) wasn't SSH-reachable yet when Ansible connected;
-  on another, the `docker` role's `apt-get install docker.io` collided
-  with cloud-init's own `apt-get install qemu-guest-agent` running
-  concurrently on the same node, and the loser failed on
-  `dpkg`'s lock-frontend. Manually checking the "unreachable" node moments
-  later showed it fully up — the pipeline just hadn't waited the extra
-  seconds cloud-init needed. Fixed by adding a `Wait for nodes to finish
-  booting` step in `pipeline.yml`'s `deploy` job, between installing
-  Ansible collections and running the playbook: polls each host's SSH port
-  first, then blocks on `cloud-init status --wait` over SSH, so `apt` on
-  the node is guaranteed free before the `docker`/`github-runner` Ansible
-  roles touch it.
-
-- **`deploy` job's `github-runner` Ansible role failed silently on a
-  registration-token 404, because the workflow never set `GITHUB_REPO`.**
-  The role reads both `GITHUB_REPO` and `GITHUB_PAT` from the environment
-  (`lookup('env', ...)`), but `pipeline.yml`'s `env:` block only ever had
-  `BASE_REGISTRY`. With `github_repo` empty, the registration-token request
-  went to `.../repos//actions/runners/registration-token`, GitHub returned a
-  non-201 status, and the `uri` module failed the task — but the actual
-  response body was hidden because the *whole task* (not just the token
-  taskss) had `no_log: true`. Fixed by adding `GITHUB_REPO:
-  Tsuyakashi/swarm-lab` alongside `GITHUB_PAT` in `pipeline.yml`'s `env:`
-  block. Lesson: when a `no_log: true` task fails opaquely, temporarily
-  register the result and drop `no_log` on that one task rather than
-  guessing — two earlier guesses here (missing runner dependencies) were
-  both wrong.
-
-- **`Configure runner` failed with `Permission denied:
-  '/root/actions-runner'` even though the files were downloaded to
-  `/home/<user>/actions-runner`.** The `Setup GitHub Actions runner` play
-  in `swarm-lab/ansible/site.yml` runs with `become: true` at the play
-  level, which applies to `Gathering Facts` too — so
-  `ansible_env.HOME` resolves to `/root`, not the SSH user's home. A
-  `runner_dir` default built from `ansible_env.HOME` therefore pointed at
-  `/root/actions-runner` for the `become_user: <ssh-user>` task, even
-  though the directory-creation tasks (running as root, then chowned)
-  had populated `/home/<user>/actions-runner`. Fixed by building
-  `runner_dir` explicitly as `/home/{{ ansible_user }}/actions-runner`
-  in `github-runner/defaults/main.yml` instead of trusting
-  `ansible_env.HOME` inside a `become: true` play.
-
-- **The `docker` and `github-runner` Ansible roles hardcoded the `vagrant`
-  user**, a leftover from the original `vagrant up` flow (Vagrant boxes
-  auto-provision a `vagrant` system user). Nodes provisioned by this repo's
-  Terraform + cloud-init use `ubuntu` instead (see
-  `modules/proxmox-vm/templates/user-data.yml.tpl`), and `vagrant` only
-  existed on them as an *accidental* side effect of the `user:` task in the
-  `docker` role (which happened to create it, since it wasn't
-  `state: absent`). Fixed by parameterizing both roles on `ansible_user`
-  (already correctly populated per-host by both the Vagrant provisioner
-  and `templates/inventory.tpl`), so neither role assumes a specific
-  provisioning flow anymore.
-
-- **`vnet0` (the nested VM's own libvirt bridge port) doesn't reattach to
-  `br0` automatically after a hard power loss.** *(Historical — from
-  `pve-rog`'s nested-VM era.)* Different failure from the `br0`/`enp4s0`
-  case above — the physical NIC stayed correctly attached throughout, but
-  `virsh domiflist` still reported `vnet0` as belonging to `br0` while
-  `brctl show br0` didn't list it as an actual port. Symptom:
-  `ip neigh show <proxmox-ip>` stuck on `FAILED`, `arp -n` showed
-  `(incomplete)`, and `arping` got zero responses — all pointing at an L2
-  problem between host and VM, even though both `br0` and `vmbr0` (inside
-  the VM) showed `state UP` with correct addresses. Confirmed the VM's own
-  network was fine via `tcpdump -i vmbr0 -n arp` from inside the VM's
-  console (still saw ARP traffic from the guest VMs/CTs). Fixed with
-  `brctl addif br0 vnet0` — but a newly added bridge port starts in STP
-  `listening`/`learning` state and doesn't forward traffic until it reaches
-  `forwarding` (~15-30s with default timers, check via `brctl showstp br0`),
-  so don't assume the fix failed just because ping still fails immediately
-  after `addif`. `install-proxmox-with-libvirt.sh`'s existing guard only
-  checked the physical-NIC side of the bridge; extended it to also check
-  and reattach `vnet0`. Kept for reference in case nesting is used again.
-
-- **MinIO CT's DHCP address isn't stable across restarts.** Unlike nodes,
-  which pin their address via cloud-init static config (a specific
-  `mac_address` + `ip_config`), `minio-lxc-init.sh` originally created CT
-  200 with `ip=dhcp`. The address drifted at least twice
-  (`192.168.100.13` → `192.168.100.10` → `192.168.100.100`), surfacing
-  indirectly and unhelpfully each time: `backend.tf` in every environment
-  silently pointed at a dead IP (`no route to host` on `terraform init`),
-  and the hardcoded MinIO URL in `environments/runner/main.tf`'s
-  `extra_runcmd` (for pulling the `terraform`/`mc` binaries) went stale
-  right along with it — three separate places that had to be manually
-  re-synced by hand after noticing, with no single point that would have
-  caught the drift earlier. Root cause was almost certainly one of the
-  hard-power-loss incidents restarting CT 200 and having the DHCP lease
-  land differently. Fixed by pinning a static IP for CT 200 in
-  `minio-lxc-init.sh` (`ip=<addr>/24,gw=<gateway>` on `net0`, same pattern
-  nodes already use), with an idempotent guard so re-running the script
-  against an already-existing CT on a stale DHCP config corrects it
-  (`pct set` + reboot) instead of silently doing nothing. Now standardized
-  on `192.168.100.100` across all environments' `backend.tf`.
-
-- **A newly created CT on `bare-pve` was completely unreachable from the
-  rest of the LAN — `Destination Host Unreachable` from every other host,
-  including the CT's own gateway — despite the CT's own network config
-  being entirely correct.** `pct config`, `ip a`/`ip route` inside the CT,
-  and even `ping` *from the Proxmox host itself* to the CT's IP all looked
-  fine — but that last check is a false positive: host↔guest traffic on the
-  same Linux bridge doesn't have to leave the bridge or touch the physical
-  NIC at all, so it proves nothing about external reachability. `tcpdump
-  -i vmbr0 -n arp` on the host, run *simultaneously* with a ping attempt
-  from another LAN host, showed literally nothing — the ARP request for
-  the CT's IP never reached the bridge's physical side. A single outbound
-  ping *from inside the CT* (`pct exec <id> -- ping <any-external-ip>`)
-  put the CT's MAC on the wire as a *source* address, and external ping
-  worked immediately afterward with no other change. At the time this
-  looked like ordinary forwarding-table aging on an upstream switch
-  (entries age out after ~5 minutes of silence on most gear). It turned
-  out to be more specific than that — see the MT-PON-AT-4 entry below,
-  which generalizes this to every new host on `bare-pve`, not just CTs.
-  Two diagnostic dead ends worth flagging so they don't eat time on a
-  repeat: (1) the *client's* `ip neigh` table can cache a stale `FAILED`
-  entry for the target IP and short-circuit further `ping` attempts
-  locally without ever generating a new ARP request — `ip neigh del <ip>
-  dev <iface>` clears it, but the entry can silently reappear as `FAILED`
-  on the very next attempt if the root cause isn't fixed yet, which looks
-  like the flush didn't work but did; (2) prefer `arping` (raw L2 ARP
-  request, ignores the routing/neighbor cache entirely) over repeated
-  plain `ping` when diagnosing this class of problem — it gives a clean,
-  uncached signal of whether the L2 path actually works.
-
-- **The CT 200 unreachable-until-pinged behavior above turned out to be a
-  general MT-PON-AT-4 quirk, not CT-specific — newly created node VMs
-  showed the identical symptom, and it's not simple forwarding-table
-  aging.** After the CT 200 incident, `prod-node`/`stage-node`/`dev-node`
-  (freshly cloned via `terraform apply`, all static-IP with
-  `wait_for_ip_disabled = true`) were unreachable from both the Zenbook
-  and `pve-rog` immediately after provisioning — `Destination Host
-  Unreachable` — while `ssh bare-pve ping <node-ip>` (same-bridge
-  traffic, proves nothing about external reachability, see the entry
-  above) worked instantly. The physical topology explains it: `bare-pve`
-  and `.3` (the Keenetic) both uplink independently into `.1` — a
-  Промсвязь MT-PON-AT-4 GPON ONT acting as the L2 hub between them (see
-  [Architecture](#architecture) above) — so a device behind `.3` (e.g.
-  the Zenbook at `.12`) can only learn a new host's MAC once traffic for
-  it has actually transited `.1`. A single outbound ping from inside the
-  new VM (over `ssh -J bare-pve`) sometimes needed two or three
-  attempts before external ping succeeded, and the first successful
-  replies showed unusually high, *decaying* RTT (thousands of ms down to
-  single-digit ms) rather than a clean instant fix — this isn't packet
-  loss, it's the ONT's own L2/forwarding state catching up over a couple
-  of seconds. Confirmed via search that unreachable-until-pinged is a
-  known MT-PON-AT-4 behavior independent of this LAN or Proxmox — other
-  users of this exact model report the same workaround (pinging devices
-  to each other to "wake" the network). Setting a static DNS server on
-  the Keenetic's WAN/broadband page does **not** help — DNS resolution
-  and L2/ARP forwarding are unrelated, and every reachability check here
-  already targets raw IPs, not hostnames. Fixed at the source instead of
-  relying on a manual `ssh -J` after every provision: the base cloud-init
-  `runcmd` (shared by every environment via
-  `modules/proxmox-vm/templates/user-data.yml.tpl`) now retries a ping to
-  `192.168.100.3` a few times right after the network stage, so every new
-  VM "wakes up" the L2 path on its own during boot, before anything tries
-  to reach it from outside `bare-pve`. Harmless no-op on `minecraft-node`
-  (isolated `vmbr1` segment has no route to `.3`; wrapped so the failure
-  doesn't block the rest of `runcmd`). Worth remembering this also means
-  `pipeline.yml`'s `Wait for nodes to finish booting` step could
-  theoretically hit the same wall if the self-hosted runner ever ends up
-  behind `.3` instead of `bare-pve` — not the current setup, but worth
-  revisiting if the runner's network placement changes.
-
-- **Bare-metal node's `apt update` failed on `enterprise.proxmox.com` with
-  `401 Unauthorized` for both `pve` and `ceph-squid`.** A fresh Proxmox VE
-  install points at the subscription-only enterprise repos by default,
-  which 401 without a paid subscription. On Proxmox VE 9.x the repo config
-  moved to `deb822` format — `/etc/apt/sources.list.d/*.sources`, not the
-  old `*.list` files a stale guide/muscle-memory might reach for first (the
-  old-format commands are silent no-ops here: `sed` on a `.list` file that
-  doesn't exist just errors `No such file or directory`, which is easy to
-  miss in a longer command chain). Fixed by removing (or disabling)
-  `pve-enterprise.sources`/`ceph.sources` and adding a `pve-no-subscription`
-  entry in the same `deb822` format:
-  ```
-  Types: deb
-  URIs: http://download.proxmox.com/debian/pve
-  Suites: trixie
-  Components: pve-no-subscription
-  Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
-  ```
-
-- **`pvecm add` without an explicit `--link0` silently wrote the wrong
-  address into `corosync.conf`, splitting the cluster in two.** Joining a
-  second node with plain `pvecm add <first-node-ip>` printed "No cluster
-  network links passed explicitly, fallback to local node IP" and then put
-  that *same* fallback address into **both** nodelist entries — including
-  the one for the node that already had a different, correct IP. Result:
-  `corosync-cfgtool -s` on each node showed only itself (`nodeid: 1:
-  localhost`), `pvecm status` reported `Nodes: 1` on both sides despite a
-  bumped `Config Version`, and each node ended up running its own
-  single-node "cluster" under the same cluster name — a real split-brain,
-  not just an unsynced join. Symptom is easy to misdiagnose as a firewall
-  or latency problem first (both were ruled out here — `pve-firewall
-  status` showed `disabled`, and `ping` between nodes was sub-millisecond)
-  before the actual cause (`cat /etc/pve/corosync.conf`, compare `ring0_addr`
-  across `nodelist` entries) becomes obvious. Fixed by always passing
-  `--link0 <joining-node-ip>` explicitly on `pvecm add`, never relying on
-  the fallback.
-
-- **An interrupted `pvecm add` (Ctrl+C during "waiting for quorum...")
-  leaves the node stuck between standalone and clustered — `rm`ing
-  `/etc/pve/corosync.conf` normally then does nothing.** `/etc/pve` is a
-  FUSE mount (`pmxcfs`); while `pve-cluster` is stopped, that mountpoint is
-  just an empty local directory, so `rm -f /etc/pve/corosync.conf` while
-  the service is down is a silent no-op — the file is still inside
-  `pmxcfs`'s own database and reappears the moment the service restarts.
-  While the service *is* running, the same file is mounted read-only
-  (`-r--r-----`, `meant to be read-only`) and a plain `rm` fails with
-  `Permission denied`. The only way to actually remove or hand-edit it is
-  `pmxcfs -l` (forces local mode, bypassing both the FUSE read-only guard
-  and the corosync/quorum requirement), edit or `rm` while in that mode,
-  then `killall pmxcfs` and `systemctl start pve-cluster` to return to
-  normal. Retrying `pvecm add` without this produces `cluster config
-  '/etc/pve/corosync.conf' already exists` even though `rm` "succeeded"
-  moments earlier.
-
-- **CT/VM disks and running processes survive a botched `pvecm add` —
-  only `/etc/pve`'s config tree does not.** The first (interrupted) cluster
-  join wiped `/etc/pve/qemu-server/*.conf` and `/etc/pve/lxc/*.conf` on the
-  joining node (`qm list`/`pct list` came back empty), which looked like
-  data loss at first. It wasn't: `pmxcfs` had backed up the pre-join
-  database to `/var/lib/pve-cluster/backup/config-<timestamp>.sql.gz`
-  before rewriting itself for the new cluster, and the actual guest
-  processes (checked via `pct status`/`qm status` bypassing the missing
-  config, and confirmed the LVM volumes were untouched in `lsblk`) had
-  never stopped running. Recovered the configs without a reboot: `zcat`
-  the backup, load it into a scratch SQLite db (`sqlite3 restore.db <
-  dump.sql`), find the right `inode` for each `<vmid>.conf`/`user.cfg`
-  under the `tree` table, dump each `data` blob back out to a file, then
-  copy those into `/etc/pve/qemu-server/<id>.conf` /
-  `/etc/pve/lxc/<id>.conf`. `qm list`/`pct list` picked them back up
-  immediately, `STATUS running` unchanged the whole time — no VM/CT
-  restart needed. (In this instance, the recovered state ended up unused
-  anyway — see the next entry — but the extraction path is worth keeping
-  in mind before assuming a config-loss scare means an actual rebuild is
-  necessary.)
-
-- **After a genuinely split cluster (see the `--link0` entry above), a
-  clean node rebuild beat trying to reconcile two divergent
-  single-node "clusters" by hand.** Once it was clear the join had
-  actually split, not just failed to sync, and the guest workloads on the
-  affected node (`ci-runner`, `minio`) were disposable/recreatable rather
-  than precious, destroying and reinstalling that node (fresh Proxmox VE
-  9.2 ISO) was faster and less error-prone than trying to merge corosync
-  state or manually reconcile two out-of-sync `/etc/pve` trees. Decide this
-  case-by-case — if a node's guests aren't easily recreated, the
-  `pmxcfs -l` manual-edit path in the entry above is the one to use
-  instead.
-
-- **`pmxcfs -l`'s "force local mode" banner is expected, not a new
-  problem.** Every time `pmxcfs -l` runs against a node that already has a
-  `corosync.conf` on disk, it prints `forcing local mode (although
-  corosync.conf exists)` — this is the tool telling you it's doing exactly
-  what was asked (ignore cluster state, mount `/etc/pve` writable and
-  local-only), not a warning that something is already broken.
-
-- **Proxmox's API rejects any non-root request to set real-device config
-  on `usbN`/`scsiN`, including a fully-privileged API token — surfaces as
-  `only root can set 'usbN' config for real devices`.** Hit first for
-  `immich-node`'s raw exFAT-disk passthrough (`scsiN`), and again for
-  `environments/workstation`'s keyboard/mouse/webcam (`usbN`) — same root
-  cause both times: this class of config bypasses Proxmox's own privilege
-  model entirely and requires `root@pam`, no matter what the API token's
-  ACL grants. There's no fix on the Terraform-provider side; the working
-  pattern in both environments is a `null_resource` + `local-exec` running
-  `qm set` directly over SSH as root, with `lifecycle { ignore_changes =
-  [usb] }` (or the disk-equivalent) on the VM resource itself — otherwise
-  the provider's own `refresh`/`plan` sees the out-of-band device as drift
-  and tries to "fix" it through the API token, hitting the exact same
-  error. See [the raw-disk-passthrough pattern](#the-raw-disk-passthrough-pattern-nullresource--local-exec)
-  above and `environments/workstation/README.md` for the USB-specific
-  version, including the positional-list index-shifting caveat that comes
-  with it.
-
-- **`virtio-gl` is single-head only in Proxmox's QEMU build — multi-monitor
-  needs `qxl2` instead, at the cost of GPU acceleration.** Tried
-  `vga_type = "virtio-gl"` first for `environments/workstation` (GPU-
-  accelerated 2D/desktop compositing via Venus/virgl through the host's
-  i915), which worked fine on one monitor but never showed a second
-  output no matter how the *host*-side X session was laid out with
-  `xrandr` — the raw device only exposes one video head, confirmed as a
-  known Proxmox limitation (not a config mistake) via the Proxmox forum.
-  Switched to `vga_type = "qxl2"` — QXL's SPICE-native multi-monitor
-  support is the only officially-supported path to more than one head,
-  trading away GPU offload (rendering becomes CPU-side) for it. Acceptable
-  here since the actual workload (browser/office/casual 2D games) doesn't
-  need hardware 3D anyway. **Changing `vga_type` on an existing VM is not
-  hot-pluggable** — same class of gotcha as `cpu_type` above — a guest-side
-  `reboot` keeps using the old QEMU display device; only a full `qm stop
-  && qm start` picks up the new one.
-
-- **A `qxl2` VM only activated one virtual head even with the right
-  `vga_type` set — because the SPICE client, not the guest, decides how
-  many heads to use.** `xrandr --query` inside the guest showed a single
-  `connected` output and three `disconnected` ones despite `vga: qxl2`
-  being correctly in the VM config — because `remote-viewer` was started
-  with plain `--full-screen` (occupies exactly one physical monitor on the
-  client side, so it only ever told the guest about one). `spice-vdagent`
-  activates additional QXL heads in response to what the SPICE client
-  reports about the client's own display layout, not proactively. Fixed
-  by using `remote-viewer --full-screen=all` instead, which reports every
-  physical monitor on the client (here, the two external monitors plugged
-  into the same host running the viewer — see
-  `scripts/desktop-kiosk-setup.sh`) and gets both QXL heads activated in
-  the guest as a result.
-
-- **SPICE draws no mouse cursor at all when the mouse is passed through to
-  the guest as a raw USB device instead of going through the SPICE input
-  channel — looks like a rendering bug, isn't one.** On
-  `environments/workstation`, the physical mouse moved the pointer and
-  clicked correctly inside the guest, but no cursor was ever visually
-  drawn on screen (forcing Tab+Enter navigation through the Ubuntu
-  installer). Root cause: SPICE only renders a cursor overlay when mouse
-  input arrives over its own input channel; a raw `usbN host=vendorid:
-  productid` passthrough sends the device straight to the guest,
-  bypassing that channel entirely, so SPICE has no idea a pointer exists
-  to draw. Normally this would be an unavoidable trade-off of USB
-  passthrough — but on this particular setup the SPICE client
-  (`remote-viewer`) and the Proxmox host run on the very same physical
-  machine (see the kiosk pattern above), so there was never a latency
-  reason to route the mouse around the host in the first place. Fixed by
-  removing the mouse from `usb_devices` and letting the host's own X
-  session handle it normally — SPICE picks the cursor back up via its
-  input channel as soon as the mouse isn't being passed through anymore.
-  The keyboard and webcam are unaffected — this is specifically a
-  mouse/SPICE-cursor interaction, not a general problem with USB
-  passthrough.
+`MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `GH_RUNNER_PAT`.
 
 ## Status
 
-- [x] Two-node Proxmox cluster (`nexus-cluster`) — `pve-rog` (peak CPU/RAM)
-      and `bare-pve` (must-have services + storage), both bare metal — plus
-      a QDevice arbiter on the Zenbook, so quorum survives either cluster
-      node going down, including over Tailscale when the arbiter isn't on
-      the LAN
-- [x] `bpg/proxmox` provider authenticated (API token + SSH key) against
-      the cluster
+- [x] Two-node Proxmox cluster (`nexus-cluster`) — `pve-rog` and `bare-pve`,
+      both bare metal — plus a QDevice arbiter on the Zenbook
+- [x] `bpg/proxmox` provider authenticated (API token + SSH key)
 - [x] Golden image template (cloud-init–ready Ubuntu 24.04), present on
       both nodes
 - [x] End-to-end `terraform apply` — clone, cloud-init, guest agent, IP
@@ -1536,114 +301,46 @@ the table above.
 - [x] Runner split into an independent root module with its own backend
 - [x] State backend (MinIO/CT 200) moved off both the runner and the node
       VMs it describes, pinned to `bare-pve` on a static IP
-      (`192.168.100.100`) so it doesn't drift on restart
-- [x] Runner state migrated from a local backend onto the same MinIO
-      bucket as the nodes (separate `runner/` key) — protects against
-      laptop/disk loss while the runner VM itself keeps running, distinct
-      from the Proxmox-loss case a local backend never protected against
-      anyway
-- [x] Full `provision` → `deploy` pipeline green end-to-end: Terraform
-      provisions nodes, Ansible (pinned `swarm-lab` tag) bootstraps Docker,
-      Swarm, stack deploy, and self-hosted runner registration, all
-      unattended — including an explicit wait for node boot/cloud-init
-      completion before Ansible touches a node (see Troubleshooting notes)
+- [x] Runner state migrated onto the same MinIO bucket as the nodes
+- [x] Full `provision` → `deploy` pipeline green end-to-end
 - [x] `docker`/`github-runner` Ansible roles are provisioning-flow
       agnostic (`ansible_user`-driven), no more hardcoded `vagrant`
 - [x] Node/runner VM provisioning extracted into a reusable module
-      (`modules/proxmox-vm`) shared by every cloud-init-based root module
-      — no more duplicated resource blocks between environments.
-      Node *count* is still driven by each environment's `var.nodes` map
-      default (not yet parameterized from outside the module/environment),
-      so adding a node today still means editing that default rather than
-      passing in a wholly external topology.
-- [x] Node/runner VMs have an explicit serial console (`serial_device`/`vga`
-      blocks, matching the golden image), so `qm terminal <vmid>` is a
-      reliable diagnosis path instead of a blank screen — closed alongside
-      the `VM.Config.HWType` privilege it requires.
-- [x] Runner host prerequisites folded into `runner/`'s cloud-init via the
-      module's `extra_packages`/`extra_runcmd`/`write_files`/`docker_group`
-      inputs — a runner recreate needs no manual dependency pass anymore.
-      Working around the regional block on HashiCorp's Terraform CLI
-      distribution required re-hosting the binary on the self-hosted MinIO
-      instance (`tools/` bucket) rather than fetching it directly.
+      (`modules/proxmox-vm`) — node *count* is still driven by each
+      environment's `var.nodes` map default, not yet parameterized
+      externally
+- [x] Node/runner VMs have an explicit serial console
+- [x] Runner host prerequisites folded into `runner/`'s cloud-init — a
+      runner recreate needs no manual dependency pass
 - [x] `scripts/register-github-runner.sh` installs/re-registers the
-      GitHub Actions runner agent itself on `ci-runner` — kept as a
-      separate, manually-run step (not cloud-init) because GitHub's
-      registration token is one-time-use and expires in ~1 hour, so it
-      can't be baked into a template that might apply at an unknown
-      later time.
-- [x] LVM thin pool exhaustion on `pve-rog` is now caught early —
-      `proxmox-init.sh` sets `thin_pool_autoextend_threshold = 80` — but
-      the underlying overcommit (sum of thin volumes vs. actual VG size)
-      is structural, not fully resolved on that node; recurs whenever real
-      disk usage catches up. Revisit node/runner `disk_size` sizing there,
-      or lean on `bare-pve`'s larger disk instead, before this needs a
-      third manual recovery.
-- [x] `environments/minecraft-node` added — isolated node (own NAT
-      segment, no LAN access), manually applied, short-lived by design.
-- [x] `environments/poly-nodes` added — infra for
-      [`poly-ci`](https://github.com/tsuyakashi/poly-ci), same shape as
-      `nodes/`. Blocked on the second golden image (VM 9001), which lives
-      on a currently-flaky HDD (`hdd-storage`) — verified working when
-      pointed at SSD storage instead, so this is WIP pending a decision on
-      that disk.
+      GitHub Actions runner agent — kept manual (registration token is
+      one-time-use, ~1hr expiry)
+- [x] LVM thin pool exhaustion on `pve-rog` is now caught early
+      (`thin_pool_autoextend_threshold = 80`), but the underlying
+      overcommit is structural — see
+      [docs/troubleshooting.md](docs/troubleshooting.md#lvm-thin-pool-exhaustion)
+- [x] `environments/minecraft-node` added — isolated node, manual apply
+- [x] `environments/poly-nodes` added — WIP, blocked on a flaky HDD
 - [x] `environments/immich-node` added — Immich via `docker compose` on a
-      dedicated `bare-pve` VM, replacing a physical-host `docker compose`
-      deployment whose disk exhaustion had previously paused an unrelated
-      cluster node (see Troubleshooting notes). Introduced the
-      `cpu_type` module input (needed here as `host`, for ML-container CPU
-      flag requirements) and the raw-disk-passthrough pattern
-      (`null_resource` + `local-exec`) for the recovery-disk bind. Not
-      wired into `pipeline.yml`, applied manually like `poly-nodes`/
-      `minecraft-node`.
-- [x] `environments/workstation` added — a GUI-installed Ubuntu Desktop
-      VM on `pve-rog`, used as an actual personal computer via external
-      monitors/keyboard/mouse/webcam passed through to the VM, with the
-      host itself running as a local SPICE kiosk
-      (`scripts/desktop-kiosk-setup.sh`). Deliberately not built on
-      `modules/proxmox-vm` (GUI install, not cloud-init). Rejected GPU
-      passthrough (Kepler VFIO reset bug, EOL driver branch) and
-      `virtio-gl` (single-head only in Proxmox's QEMU build) in favor of
-      `qxl2` for two-monitor SPICE support. Reused the raw-passthrough
-      `null_resource` + SSH pattern for real USB devices. Not wired into
-      `pipeline.yml`, applied manually like `poly-nodes`/`minecraft-node`/
-      `immich-node`. See its own
-      [`environments/workstation/README.md`](environments/workstation/README.md).
+      dedicated `bare-pve` VM
+- [x] `environments/workstation` added — GUI-installed Ubuntu Desktop VM
+      on `pve-rog`, local SPICE kiosk
 - [x] Dedicated hardware acquired for `bare-pve`, and `pve-rog`
-      subsequently rebuilt onto bare metal too — both `nexus-cluster`
-      nodes are now real hardware, no nested/virtualized Proxmox layer
-      remains anywhere in the cluster (`scripts/install-proxmox-with-libvirt.sh`
-      kept only for historical/future-nesting reference, see
-      [Repo layout](#repo-layout))
+      subsequently rebuilt onto bare metal too — see
+      [docs/history.md](docs/history.md)
 - [x] Cluster-wide NFS shared storage (`shared-storage`, hosted on
-      `bare-pve`) registered for ISO/template/backup content
-- [x] New-host unreachability on `bare-pve` (MT-PON-AT-4 L2 quirk — see
-      Troubleshooting notes) is now handled automatically for every
-      environment via a wake-ping in the shared base cloud-init `runcmd`,
-      instead of relying on a manual `ssh -J bare-pve` after each
-      provision.
-- [x] Migrate MinIO (CT 200) and the CI runner onto `bare-pve`
-      specifically (currently redeployed fresh post-cluster rather than
-      moved; the state/backend split above already makes this safe to do
-      whenever)
-- [x] `TerraformProv` role/ACLs live in `/etc/pve` (pmxcfs), which
-      replicates cluster-wide via corosync — there's no per-node role
-      state to "re-verify" separately; a single check against either
-      node confirms both. Superseded the earlier phrasing of this as a
-      per-node task.
+      `bare-pve`) registered
+- [x] New-host unreachability on `bare-pve` (MT-PON-AT-4 L2 quirk) handled
+      automatically via a wake-ping in the shared base cloud-init `runcmd`
+- [x] MinIO (CT 200) and the CI runner live on `bare-pve`
+- [x] `TerraformProv` role/ACLs live in `/etc/pve` (pmxcfs), cluster-wide —
+      no per-node re-verification needed
 - [ ] Vault (or similar) for the secrets currently living as plaintext on
-      disk (`/root/terraform-token.json`, cloud-init snippets) — noted as
-      an acceptable trade-off for now, not yet addressed
-- [x] `immich-node`'s recovery-disk bind is now Terraform-managed
-      (`null_resource` + `local-exec` running `qm set -scsiN`, applied
-      automatically on `terraform apply` — see
-      [the raw-disk-passthrough pattern](#the-raw-disk-passthrough-pattern-nullresource--local-exec)
-      above). What remains manual, and will stay that way (guest-OS-level
-      config, not something Terraform can reach): installing `exfat-fuse`,
-      mounting the disk inside the guest, the `mnt-recovery-ro.mount`/
-      `immich.service` systemd units, and the initial data `rsync` — see
-      `environments/immich-node/README.md`.
+      disk (`/root/terraform-token.json`, cloud-init snippets) — a
+      `scripts/vault-lxc-init.sh` exists (raft storage, manual unseal) but
+      isn't wired into any environment's secret flow yet
+- [x] `immich-node`'s recovery-disk bind is Terraform-managed; what remains
+      manual is guest-OS-level config — see
+      [environments/immich-node/README.md](environments/immich-node/README.md)
 - [x] `swarm-lab`'s `Vagrantfile` stays — deliberately kept so `swarm-lab`
-      remains a fully independent, self-contained project that can be spun
-      up on its own hardware without this repo. This repo is a separate,
-      Proxmox-specific provisioning path, not a replacement for it.
+      remains a fully independent, self-contained project
