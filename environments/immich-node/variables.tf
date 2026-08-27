@@ -15,7 +15,7 @@ variable "proxmox_insecure" {
 variable "proxmox_node" {
   description = "Target Proxmox node name"
   type        = string
-  default     = "pve"
+  default     = "bare-pve"
 }
 
 variable "template_vm_id" {
@@ -36,6 +36,12 @@ variable "gateway" {
   default = "192.168.100.1"
 }
 
+variable "proxmox_host_ip" {
+  description = "IP хоста pve для ssh qm set (raw disk passthrough не заводится через provider)"
+  type        = string
+  default     = "192.168.100.30"
+}
+
 variable "nodes" {
   description = "immich-node topology. Стартовые ресурсы минимальные — 4 vCPU/4GB/50GB, докидываем по ситуации."
   type = map(object({
@@ -51,18 +57,15 @@ variable "nodes" {
   default = {
     "immich-node" = {
       tag_name           = "immich",
-      memory             = 4096,
-      cores              = 4,
+      memory             = 20480,
+      cores              = 8,
       disk_size          = 100,
       ip                 = "192.168.100.60/24"
       cpu_type           = "host",
       recovery_ro_device = "/dev/sdb1"
+      proxmox_host_ip    = "192.168.100.20"
+      proxmox_node       = "pve-rog"
+      template_vm_id     = 9001
     }
   }
-}
-
-variable "proxmox_host_ip" {
-  description = "IP хоста pve для ssh qm set (raw disk passthrough не заводится через provider)"
-  type        = string
-  default     = "192.168.100.30"
 }
