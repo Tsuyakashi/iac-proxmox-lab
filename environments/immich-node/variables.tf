@@ -37,7 +37,7 @@ variable "gateway" {
 }
 
 variable "proxmox_host_ip" {
-  description = "IP хоста pve для ssh qm set (raw disk passthrough не заводится через provider)"
+  description = "IP хоста bare-pve для ssh qm set (raw disk passthrough не заводится через provider)"
   type        = string
   default     = "192.168.100.30"
 }
@@ -57,15 +57,12 @@ variable "nodes" {
   default = {
     "immich-node" = {
       tag_name           = "immich",
-      memory             = 20480,
-      cores              = 8,
+      memory             = 4096,
+      cores              = 2,
       disk_size          = 100,
       ip                 = "192.168.100.60/24"
       cpu_type           = "host",
       recovery_ro_device = "/dev/sdb1"
-      proxmox_host_ip    = "192.168.100.20"
-      proxmox_node       = "pve-rog"
-      template_vm_id     = 9001
     }
   }
 }
