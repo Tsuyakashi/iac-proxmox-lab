@@ -54,6 +54,8 @@ module "ci_runner" {
     "systemctl enable --now docker",
     "curl -o /usr/local/bin/terraform http://192.168.100.100:9000/tools/terraform_1.15.8_linux_amd64",
     "chmod +x /usr/local/bin/terraform",
+    "curl -o /usr/local/bin/vault http://192.168.100.100:9000/tools/vault_1.19.0_linux_amd64",
+    "chmod +x /usr/local/bin/vault",
     "curl -o /usr/local/bin/mc https://dl.min.io/aistor/mc/release/linux-amd64/mc",
     "chmod +x /usr/local/bin/mc",
     "for i in 1 2 3; do ping -c1 -W2 192.168.100.3 && break || sleep 2; done || true"
