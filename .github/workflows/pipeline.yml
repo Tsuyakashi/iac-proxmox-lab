@@ -62,7 +62,7 @@ jobs:
 
       - name: Terraform apply
         id: apply
-        run: terraform apply -auto-approve -parallelism=1
+        run: terraform apply -auto-approve
 
       - uses: actions/upload-artifact@v4
         with:
