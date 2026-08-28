@@ -77,10 +77,17 @@ physical LAN quirks, and the state-backend placement is in
   VMs; also serves as an internal binary mirror for tools blocked by
   regional restrictions (see [docs/architecture.md](docs/architecture.md#state-backend-lives-off-both))
 - **Vault** (LXC, systemd daemon, no Docker, raft/integrated storage) —
-  standing up on `bare-pve` (CT 300) as the future home for secrets
-  currently living as plaintext on disk (`/root/terraform-token.json`,
-  cloud-init snippets). Not yet wired into any environment's secret flow —
-  see the Status section below and `scripts/vault-lxc-init.sh`.
+  standing up on `bare-pve` (CT 300) as the secrets backend for CI.
+  `scripts/vault-lxc-init.sh` stands up the service and handles the
+  `mlock`/unseal mechanics (see `docs/troubleshooting.md`); a separate
+  `scripts/vault-approle-init.sh` configures an AppRole
+  (`terraform-provisioner` policy, `ci-runner` role) that the self-hosted
+  runner authenticates with in `pipeline.yml` to pull the Proxmox API
+  token, the CI SSH private key, the MinIO credentials, and the GitHub
+  runner PAT at job runtime — none of these live as plaintext GitHub
+  Actions secrets anymore. `/root/terraform-token.json` on the Proxmox
+  host has been deleted now that its contents live in Vault
+  (`proxmox/terraform-provider`).
 - **Ansible** — post-provision configuration, delegated to
   [`swarm-lab`](../swarm-lab)'s playbook via a pinned git tag (see
   [CI/CD](#cicd) below)
@@ -318,9 +325,13 @@ rather than silently picking up whatever `swarm-lab`'s `main` happens to be
 at trigger time. See [swarm-lab's own README](../swarm-lab/README.md#cicd)
 for how its application images are versioned separately.
 
-Required repo/environment secrets: `PROXMOX_ENDPOINT`, `PROXMOX_API_TOKEN`,
-`VM_SSH_PUBLIC_KEY`, `CI_SSH_PUBLIC_KEY`, `CI_SSH_PRIVATE_KEY`,
-`MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `GH_RUNNER_PAT`.
+Required repo secrets: `PROXMOX_ENDPOINT`, `CI_SSH_PUBLIC_KEY`,
+`VM_SSH_PUBLIC_KEY`, `VAULT_ROLE_ID`, `VAULT_SECRET_ID`. Everything else
+the pipeline needs (the Proxmox API token, the CI SSH private key, MinIO
+credentials, the GitHub runner PAT) is fetched from Vault at job runtime
+via the `ci-runner` AppRole — see `scripts/vault-approle-init.sh` and the
+`Fetch secrets from Vault` step in both `provision` and `deploy` jobs of
+`pipeline.yml`.
 
 ## Status
 
@@ -374,10 +385,16 @@ Required repo/environment secrets: `PROXMOX_ENDPOINT`, `PROXMOX_API_TOKEN`,
       the capability alone isn't sufficient in an unprivileged LXC's user
       namespace, see
       [docs/troubleshooting.md](docs/troubleshooting.md#vault-mlock-enomem-in-unprivileged-lxc)),
-      initialized and unsealed. **Not yet wired into any environment's
-      secret flow** — `/root/terraform-token.json` and cloud-init secrets
-      still live as plaintext on disk; migrating them to Vault (AppRole/
-      token auth for the runner, etc.) is a separate follow-up.
+      initialized and unsealed. **Wired into the CI pipeline** via an
+      AppRole (`scripts/vault-approle-init.sh`) — `pipeline.yml`'s
+      `provision` and `deploy` jobs authenticate as the `ci-runner` role
+      and pull the Proxmox API token, CI SSH private key, MinIO
+      credentials, and GitHub runner PAT at job runtime, replacing five
+      plaintext GitHub Actions secrets. `/root/terraform-token.json` has
+      been removed from both Proxmox hosts. Manual-apply environments
+      (`runner`, `poly-nodes`, `minecraft-node`, `immich-node`,
+      `workstation`) still read `terraform.tfvars` locally — not yet
+      migrated, tracked as a possible follow-up.
 - [x] `immich-node`'s recovery-disk bind is Terraform-managed; what remains
       manual is guest-OS-level config — see
       [environments/immich-node/README.md](environments/immich-node/README.md)

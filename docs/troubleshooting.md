@@ -754,3 +754,40 @@ inside an unprivileged LXC (not just Vault) — the same two-part
 requirement (file capability + `lxc.prlimit.memlock`) applies generally,
 this just happened to be the first workload in the lab that actually
 exercises `mlock`.
+
+<a id="vault-add-mask-inline-corrupts-token"></a>
+## `::add-mask::` embedded inside a variable assignment silently corrupted the Vault token, not just failed to mask it
+
+While wiring `pipeline.yml`'s `Fetch secrets from Vault` step, an early
+draft wrote `VAULT_TOKEN=::add-mask::$VAULT_TOKEN vault kv get ...`,
+intending `::add-mask::` to hide the token in the job log. It doesn't
+work that way — `::add-mask::<value>` is a GitHub Actions workflow
+command, parsed only when it's the literal content of a step's `echo`
+output, not when it appears inside a shell variable assignment on the
+same line as another command. The actual effect: `VAULT_TOKEN` was set
+to the literal string `::add-mask::<token>` (prefix included) for the
+`vault kv get` invocation, which is not a valid token, so the call failed
+authentication outright. Masking a value that's about to be *used*, not
+just logged, has to happen as its own step: `echo "::add-mask::$VALUE"`
+on its own line, before the value is referenced anywhere else. Fixed by
+splitting the masking into a separate `echo` immediately after each
+secret is captured, before it's used in any subsequent command.
+
+<a id="vault-addr-defaults-to-localhost"></a>
+## `vault` CLI silently defaults `VAULT_ADDR` to `https://127.0.0.1:8200` when unset, producing a `connection refused` that looks like Vault itself is down
+
+Running `scripts/vault-approle-init.sh` without first exporting
+`VAULT_ADDR` failed every `vault` call with `dial tcp 127.0.0.1:8200:
+connect: connection refused` and a `WARNING! VAULT_ADDR and -address
+unset. Defaulting to https://127.0.0.1:8200.` — easy to misread as "Vault
+(CT 300) isn't running" rather than "the CLI is pointed at the wrong
+host entirely" (CT 300's actual address is `192.168.100.200:8200`, not
+localhost on whatever machine is running the script). The warning line
+is printed but easy to miss above the error. Fixed the script itself to
+fail fast with a clear message instead of silently trying localhost:
+`: "${VAULT_ADDR:?set VAULT_ADDR before running (e.g.
+http://192.168.100.200:8200)}"` at the top of
+`scripts/vault-approle-init.sh`. Worth remembering for any future
+one-off `vault` CLI invocation from the laptop or the runner — always
+export `VAULT_ADDR` explicitly first, don't rely on remembering to pass
+`-address` per-command.
