@@ -791,3 +791,107 @@ http://192.168.100.200:8200)}"` at the top of
 one-off `vault` CLI invocation from the laptop or the runner — always
 export `VAULT_ADDR` explicitly first, don't rely on remembering to pass
 `-address` per-command.
+
+<a id="vault-apply-wrapper-stale-token-skips-ssh-key-fetch"></a>
+## `vault-apply-wrapper.sh`'s `terraform()` gate only checked `TF_VAR_proxmox_api_token` — a stale cached token from an older shell session silently skipped the (newly added) SSH-key fetch
+
+After migrating `vm_ssh_public_key`/`ci_ssh_public_key` into Vault
+(`proxmox/ssh-keys`) and adding their fetch to `_tfv_fetch_secrets()`, a
+`terraform plan` in `environments/immich-node` still prompted interactively
+for both keys — despite `vault kv get proxmox/ssh-keys` returning both
+fields correctly and the wrapper function being present and correct in the
+sourced shell (`type terraform` showed the right function body). The
+`terraform()` wrapper only calls `_tfv_fetch_secrets` when
+`TF_VAR_proxmox_api_token` is unset:
+
+```bash
+terraform() {
+    if [ -f "./variables.tf" ] && grep -q "proxmox_api_token" ./variables.tf 2>/dev/null; then
+        if [ -z "${TF_VAR_proxmox_api_token:-}" ]; then
+            _tfv_fetch_secrets || return $?
+        fi
+    fi
+    command terraform "$@"
+}
+```
+
+`TF_VAR_proxmox_api_token` was already exported in that shell from an
+*earlier* session (exported environment variables survive `source
+~/.bashrc` — that only re-runs the script, it doesn't unset variables
+already present in the running shell). With the token non-empty, the `-z`
+check short-circuited and `_tfv_fetch_secrets` — the only place that
+fetches the SSH keys too — never ran, even though the wrapper script on
+disk was already updated to fetch them. Any secret added to
+`_tfv_fetch_secrets` after a shell has already cached
+`TF_VAR_proxmox_api_token` will have the same silent-skip problem, not just
+the SSH keys specifically.
+
+**Fix (immediate):** unset the cached variables and let the next
+`terraform` invocation re-fetch everything:
+
+```bash
+unset TF_VAR_proxmox_api_token TF_VAR_vm_ssh_public_key TF_VAR_ci_ssh_public_key
+terraform plan
+```
+
+Opening a brand-new terminal also works, since the stale export only lives
+in the old shell process.
+
+**Fix (structural, landed in the wrapper):** the gate now checks all three
+`TF_VAR_*` values the wrapper is responsible for, not just the API token,
+so a partially-populated shell (old token cached, new secret never
+fetched) re-triggers `_tfv_fetch_secrets`:
+
+```bash
+if [ -z "${TF_VAR_proxmox_api_token:-}" ] || \
+   [ -z "${TF_VAR_vm_ssh_public_key:-}" ] || \
+   [ -z "${TF_VAR_ci_ssh_public_key:-}" ]; then
+    _tfv_fetch_secrets || return $?
+fi
+```
+
+Worth remembering the next time another `TF_VAR_*` is added to
+`_tfv_fetch_secrets`: the gate list needs the new variable added too, or
+the same class of stale-cache skip repeats silently.
+
+<a id="immich-node-endpoint-golden-image-mismatch-with-actual-node"></a>
+## `immich-node`'s `proxmox_node` default (and README) said `bare-pve`; the VM has always actually lived on `pve-rog`
+
+`environments/immich-node/variables.tf`'s `proxmox_node` default and the
+environment's README topology table both said `bare-pve` since the
+environment was first added — but the Datacenter tree has always shown VM
+101 under `pve-rog`, not `bare-pve`. This went unnoticed because, before
+the `locals.tf` endpoint/golden-image refactor (see the root README's
+[Node placement](../README.md#node-placement-endpoint--golden-image-resolution)
+section), `proxmox_endpoint` was set explicitly wherever `terraform.tfvars`
+happened to point it — so a docs/`variables.tf` mismatch with the *actual*
+node never surfaced as a Terraform-level error, just as stale
+documentation. Only became visible when reviewing every environment's
+`proxmox_node` default against the real cluster tree as part of migrating
+every environment onto the `proxmox_node`-only resolution pattern.
+
+Two things needed fixing together, not just the default:
+
+- `proxmox_node` default: `"bare-pve"` → `"pve-rog"` — this also flips
+  which golden image (`template_vm_id`) a fresh clone would use (9000 →
+  9001), matching where the VM is actually cloned from.
+- `proxmox_host_ip` default: `"192.168.100.30"` → `"192.168.100.20"` —
+  this is a *separate* variable, not derived from `proxmox_node`, used
+  only for the `null_resource.recovery_ro_bind`'s `ssh root@... qm set`
+  call (see
+  [architecture.md#the-raw-disk-passthrough-pattern-null_resource--local-exec](architecture.md#the-raw-disk-passthrough-pattern-null_resource--local-exec)).
+  Fixing only `proxmox_node` and missing this one would leave the
+  raw-disk bind silently SSHing into the wrong host on every future
+  `apply` — the two variables have no compile-time link, so a partial fix
+  fails quietly rather than erroring.
+
+Applied per this repo's "what's deployed stays where it is" rule: the
+running VM was left in place on `pve-rog`, and the defaults/docs were
+corrected to match reality rather than migrating the VM to match the
+older (incorrect) documentation. Worth checking any environment's
+`proxmox_node`-adjacent defaults (`proxmox_host_ip`, `template_node`
+overrides in multi-VM `var.nodes` maps) as a pair whenever one of them
+turns out to be wrong — see also the `minecraft-node` cross-node-clone fix
+elsewhere in this file, same underlying pattern (two Proxmox-node-shaped
+values that can drift independently unless one is derived from the
+other).
