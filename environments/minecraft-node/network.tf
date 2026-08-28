@@ -28,8 +28,17 @@ resource "null_resource" "isolated_nat" {
   }
 
   connection {
-    type  = "ssh"
-    host  = regex("https://([^:/]+)", var.proxmox_endpoint)[0]
+    type = "ssh"
+    # ВАЖНО: не local.proxmox_endpoint (тот резолвится от корневого
+    # var.proxmox_node — дефолт "bare-pve", вход в кластерный API,
+    # но необязательно совпадает с нодой размещения). Мост/NAT-правила
+    # применяются физически на var.nodes["minecraft-node"].proxmox_node
+    # (по факту pve-rog) — SSH должен идти именно туда, иначе iptables
+    # применятся не на том хосте, где реально поднят vmbr1.
+    host = regex(
+      "https://([^:/]+):",
+      local.proxmox_nodes[var.nodes["minecraft-node"].proxmox_node].endpoint
+    )[0]
     user  = "root"
     agent = true
   }

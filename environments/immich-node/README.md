@@ -1,29 +1,70 @@
 # immich-node
 
-Отдельная VM под Immich (docker-compose, не swarm) на ноде `pve` (`.30`),
-`local-lvm`. Переехала с `rog` после инцидента с заполнением диска
-(immich-compose съел место под nested `pve-rog`, VM встала на паузу,
-кластер потерял кворум). История разбора — в основном README репозитория.
+Отдельная VM под Immich (docker-compose, не swarm) на ноде `pve-rog`
+(`.20`), `local-lvm`. Переехала с ad-hoc `docker compose` на отдельном
+физическом хосте после инцидента с заполнением диска (immich-compose съел
+место под nested `pve-rog`, VM встала на паузу, кластер потерял кворум).
+История разбора — в основном README репозитория.
+
+> **Хост поправлен на факт (2026-08-28).** Дефолт `proxmox_node` в
+> `variables.tf` и эта таблица раньше указывали `bare-pve` — реальное
+> дерево Datacenter всегда показывало VM 101 на `pve-rog`. По правилу
+> «что задеплоено — там и остаётся» исправлен дефолт/README под факт, а
+> не сама VM под старые доки. Синхронно поправлен и `proxmox_host_ip`
+> (`.20`, не `.30`) — от него зависит, куда `null_resource.recovery_ro_bind`
+> шлёт `qm set` по SSH; если бы поправили только `proxmox_node`, бинд
+> продолжил бы стучаться не в тот хост.
 
 ## Топология
 
 | | |
 |---|---|
 | VM ID | 101 |
-| Host | `bare-pve` (`.30`) |
+| Host | `pve-rog` (`.20`) |
 | IP | `192.168.100.60/24` |
 | Ресурсы | 2 vCPU / 4GB RAM / 100GB disk (`local-lvm`) |
 | CPU type | `host` |
+| Golden image | VM 9001 (локальный на `pve-rog`, см. `locals.tf`) |
 
 > Синхронизировано с дефолтом `var.nodes["immich-node"]` в `variables.tf`
 > (`cores = 2`, `memory = 4096`, `disk_size = 100`) — эта таблица раньше
-> разъехалась с реальными значениями (показывала 4 vCPU / 70GB), см.
+> разъезжалась с реальными значениями (показывала 4 vCPU / 70GB), см.
 > [../../docs/troubleshooting.md#immich-node-variablestf-had-a-strict-object-type-violation-and-a-stale-readme-table](../../docs/troubleshooting.md#immich-node-variablestf-had-a-strict-object-type-violation-and-a-stale-readme-table).
 > Если ресурсы этой VM снова поменяются в `variables.tf` — обнови и эту
-> строку в том же PR, не отдельным заходом.
+> строку в том же PR, не отдельным заходом. То же правило теперь
+> действует и на строку `Host`/`Golden image` выше — если VM когда-нибудь
+> реально мигрирует между нодами, `proxmox_node`/`proxmox_host_ip`
+> в `variables.tf` и эта таблица обновляются в одном PR.
 
 Не изолирована в отдельный VLAN/network namespace (в отличие от
 `minecraft-node`) — Immich наружу не выставляется.
+
+## Эндпоинт и golden image: выводятся из `proxmox_node`, не задаются отдельно
+
+`environments/immich-node/locals.tf` резолвит и Proxmox API endpoint, и
+`template_vm_id` из одного и того же `var.proxmox_node`:
+
+```hcl
+locals {
+  proxmox_nodes = {
+    "bare-pve" = { endpoint = "https://192.168.100.30:8006/", template_vm_id = 9000 }
+    "pve-rog"  = { endpoint = "https://192.168.100.20:8006/", template_vm_id = 9001 }
+  }
+
+  proxmox_endpoint = local.proxmox_nodes[var.proxmox_node].endpoint
+  template_vm_id   = local.proxmox_nodes[var.proxmox_node].template_vm_id
+}
+```
+
+Раньше `proxmox_endpoint` был отдельной переменной, а `template_vm_id`
+жил в дефолтах `var.nodes` — можно было прописать один Proxmox-хост в
+`.tfvars`, а клонировать golden image с другого, получив на выходе VM,
+которая физически стоит не там, где Terraform думает, что она стоит (тот
+же класс бага, что закрыт для `minecraft-node` в
+[../../docs/troubleshooting.md](../../docs/troubleshooting.md)). Теперь
+единственный вход — `var.proxmox_node` (дефолт — `pve-rog`, по факту), и
+`template_node` в `main.tf` всегда равен ему же, кросс-нодовый клон здесь
+структурно невозможен.
 
 ## CPU type: почему `host`, а не дефолт модуля
 
@@ -64,7 +105,7 @@ variable "nodes" {
 
 Библиотека Immich (36892 фото, ~189GB) живёт не в managed-хранилище, а
 на отдельном физическом exFAT-диске (`RECOVERY`, 232.9G), подключённом
-к хосту `pve` как `/dev/sdb1` и проброшенном в VM как raw block device
+к хосту `pve-rog` как `/dev/sdb1` и проброшенном в VM как raw block device
 в режиме read-only.
 
 В Immich это настроено как **External Library** с путём
@@ -79,7 +120,9 @@ disk-ресурс им не поддерживается — единствен�
 
 ### Реализация в Terraform
 
-`null_resource` с `local-exec`, дергающий `qm set` по ssh на хост:
+`null_resource` с `local-exec`, дергающий `qm set` по ssh на хост
+(`var.proxmox_host_ip`, дефолт `192.168.100.20` — синхронизирован с
+`var.proxmox_node`, см. врезку в начале файла):
 
 ```hcl
 resource "null_resource" "recovery_ro_bind" {
@@ -189,7 +232,7 @@ immich.service`), иначе контейнер продолжит видеть 
 файл падает почти мгновенно, а не гоняет реальную ML-инференцию,
 очередь **Waiting** на графике "Jobs over time" обманчиво резко падает
 — выглядит как быстрый прогресс, на деле это волна фейлов при
-低-загрузке CPU (в инциденте 26.08.2026 — 13.5% CPU при "обработке"
+низкой загрузке CPU (в инциденте 26.08.2026 — 13.5% CPU при "обработке"
 тысяч задач в минуту).
 
 **Разбор такого инцидента, если он уже произошёл:**
@@ -272,9 +315,9 @@ sudo systemctl enable --now immich.service
 
 ```bash
 cd environments/immich-node
-cp terraform.tfvars.example terraform.tfvars   # заполнить
-export AWS_ACCESS_KEY_ID=<minio-user>
-export AWS_SECRET_ACCESS_KEY=<minio-password>
+source ../../scripts/vault-apply-wrapper.sh   # один раз на сессию — фетчит
+                                                # api-token/ssh-ключи/minio-creds
+                                                # из Vault, terraform.tfvars не нужен
 terraform init
 terraform apply
 ```
@@ -310,3 +353,4 @@ docker compose logs database | grep "ready to accept connections"
 |---|---|---|---|
 | 2026-08-26 | `mnt-recovery-ro.mount` в `failed`, тысячи `ENOENT`/`Input file is missing` в логах `immich_server`, очередь Facial Recognition резко "падает" (фейлы, не прогресс) | `Type=fuse.exfat-fuse` в юните не матчился с реальным бинарником пакета (`/sbin/mount.exfat-fuse`, без префикса `fuse.`) → `exfat-fuse: not found`, `status=127` | Юнит переведён на `Type=exfat-fuse`; после ремонта — `systemctl restart immich.service` для пересборки bind-mount в контейнере; проверено, что `Trash`/offline-ассеты не пострадали до перезапуска (сработали вовремя) |
 | 2026-08-27 | Ревью диффа обнаружило, что дефолт `var.nodes["immich-node"]` в `variables.tf` разъезжался с этой таблицей (README показывал 4 vCPU/70GB, реальные значения — 2 vCPU/100GB) | Таблица не обновлялась после апгрейда ресурсов диска | Таблица выше синхронизирована с `variables.tf` (2 vCPU / 4GB / 100GB); см. [docs/troubleshooting.md](../../docs/troubleshooting.md#immich-node-variablestf-had-a-strict-object-type-violation-and-a-stale-readme-table) для полного разбора (тот же ревью также поймал три лишних ключа в дефолте, не описанных в `object({...})`-типе, до того как они попали в `apply`) |
+| 2026-08-28 | README/`variables.tf` продолжали указывать `bare-pve` как хост, хотя дерево Datacenter всегда показывало VM 101 на `pve-rog` | Дефолт `proxmox_node` никогда не сверялся с фактическим размещением после того, как `locals.tf`/эндпоинт-резолюшн внедрили по всем environments | `proxmox_node` дефолт исправлен на `pve-rog`, `proxmox_host_ip` синхронно на `.20` (иначе `null_resource.recovery_ro_bind` продолжил бы слать `qm set` не туда), таблица топологии и `Golden image` строка обновлены под факт |

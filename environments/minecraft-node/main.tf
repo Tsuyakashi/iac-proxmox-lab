@@ -1,28 +1,31 @@
-# environments/nodes
+# environments/minecraft-node
 #
-# Root-модуль prod/stage/dev нод. Отдельный state (S3/MinIO, см. backend.tf),
-# отдельный lifecycle от environments/runner — так, чтобы terraform apply
-# здесь никогда не мог задеть CI runner (и наоборот). Подробности инцидента,
-# из-за которого это разделение появилось — см. корневой README.
+# Изолированный node на своём NAT-сегменте (vmbr1). Раньше template_node был
+# захардкожен на "bare-pve", хотя сама VM клонируется на pve-rog (через
+# each.value.proxmox_node) — рабочий кросс-нодовый клон, но именно он был
+# причиной бага "unable to find configuration file for VM 9000 on node
+# 'pve-rog'" (см. docs/troubleshooting.md). Теперь template_node и
+# template_vm_id всегда резолвятся из той же ноды, что и сам apply —
+# кросс-нодовый клон больше не нужен в принципе (у каждой ноды свой local
+# golden image, 9000 на bare-pve / 9001 на pve-rog).
 
 module "node" {
   source   = "../../modules/proxmox-vm"
   for_each = var.nodes
 
   name              = each.key
-  template_vm_id    = var.template_vm_id
+  template_node     = coalesce(each.value.proxmox_node, var.proxmox_node)
+  template_vm_id    = local.proxmox_nodes[coalesce(each.value.proxmox_node, var.proxmox_node)].template_vm_id
   tags              = [each.value.tag_name]
   cores             = each.value.cores
   memory            = each.value.memory
   mac_address       = each.value.mac
   datastore_id_disk = each.value.datastore_id_disk
 
-  template_node = "bare-pve"
-  proxmox_node  = coalesce(each.value.proxmox_node, var.proxmox_node)
-  migrate       = true # временно, на время миграции
+  proxmox_node = coalesce(each.value.proxmox_node, var.proxmox_node)
+  migrate      = true # временно, на время миграции
 
   network_bridge = "vmbr1"
-
 
   ip_config = {
     mode    = "static"

@@ -14,9 +14,6 @@ on:
   workflow_dispatch:
 
 env:
-  TF_VAR_proxmox_endpoint: ${{ secrets.PROXMOX_ENDPOINT }}
-  TF_VAR_vm_ssh_public_key: ${{ secrets.VM_SSH_PUBLIC_KEY }}
-  TF_VAR_ci_ssh_public_key: ${{ secrets.CI_SSH_PUBLIC_KEY }}
   BASE_REGISTRY: ghcr.io/tsuyakashi/swarm-lab
   GITHUB_REPO: Tsuyakashi/swarm-lab
 
@@ -43,6 +40,16 @@ jobs:
           API_TOKEN=$(VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=api_token proxmox/terraform-provider)
           echo "::add-mask::$API_TOKEN"
           echo "TF_VAR_proxmox_api_token=$API_TOKEN" >> "$GITHUB_ENV"
+
+          # Публичные ключи не секретны по природе, но живут в том же
+          # Vault-пути (proxmox/ssh-keys), что и для ручного apply через
+          # scripts/vault-apply-wrapper.sh — единый источник правды вместо
+          # отдельной пары GitHub Secrets, которая могла разъехаться с тем,
+          # что реально лежит в Vault.
+          VM_SSH_PUBLIC_KEY=$(VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=vm_public_key proxmox/ssh-keys)
+          CI_SSH_PUBLIC_KEY=$(VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=ci_public_key proxmox/ssh-keys)
+          echo "TF_VAR_vm_ssh_public_key=$VM_SSH_PUBLIC_KEY" >> "$GITHUB_ENV"
+          echo "TF_VAR_ci_ssh_public_key=$CI_SSH_PUBLIC_KEY" >> "$GITHUB_ENV"
 
           VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=private_key proxmox/ci-ssh-key > ~/.ssh/ci_private_key_from_vault
 

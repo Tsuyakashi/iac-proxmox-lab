@@ -1,8 +1,5 @@
-proxmox_endpoint  = "https://192.168.100.20:8006/"
-proxmox_api_token = "terraform@pve!provider-token="
-
-# iso_file_id ("local:iso/ubuntu-26.04-desktop-amd64.iso" по умолчанию —
-# см. variables.tf) уже зашит в default var.nodes, менять/оверрайдить тут
-# не нужно, если файл называется так же. Перед apply образ должен уже
-# лежать в датасторе на pve-rog: /var/lib/vz/template/iso/ (scp/rsync)
-# или через веб-UI (Datacenter → pve-rog → local → ISO Images → Upload).
+# proxmox_endpoint  — теперь выводится из proxmox_node (см. locals.tf), не переменная.
+# proxmox_api_token — приходит через TF_VAR_proxmox_api_token из scripts/vault-apply-wrapper.sh.
+#
+# ISO уже должен лежать в датасторе на pve-rog — см. раздел "Установка" в
+# README, Terraform его не качает и не заливает сам.

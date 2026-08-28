@@ -1,4 +1,7 @@
-proxmox_endpoint  = "https://192.168.100.30:8006/"
-proxmox_api_token = "terraform@pve!provider-token="
-vm_ssh_public_key = "ssh-ed25519 AAAA..."
-ci_ssh_public_key = "ssh-ed25519 AAAA..."
+# Ничего заполнять не нужно для обычного запуска.
+#
+# proxmox_endpoint  — теперь выводится из proxmox_node (см. locals.tf), не переменная.
+# proxmox_api_token — приходит через TF_VAR_proxmox_api_token из scripts/vault-apply-wrapper.sh.
+# vm_ssh_public_key / ci_ssh_public_key — приходят из Vault тем же враппером
+#   (proxmox/ssh-keys), см. scripts/vault-apply-wrapper.sh и
+#   scripts/vault-userpass-init.sh.

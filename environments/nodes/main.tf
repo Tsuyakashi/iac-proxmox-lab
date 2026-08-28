@@ -11,7 +11,8 @@ module "node" {
 
   name           = each.key
   proxmox_node   = var.proxmox_node
-  template_vm_id = var.template_vm_id
+  template_node  = var.proxmox_node # клонируем с локального golden image той же ноды, не через кластер
+  template_vm_id = local.template_vm_id
   tags           = [each.value.tag_name]
   cores          = each.value.cores
   memory         = each.value.memory

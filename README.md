@@ -26,12 +26,13 @@ here (nested → bare metal, the flat-layout → modules refactor), see
 │ peak-load capacity             │       │ must-have always-on services          │
 │  │                             │       │  │                                    │
 │  └── vmbr0 ─────────┐          │       │  └── vmbr0 ─────────┐                 │
-│       ├ VM 9000 golden image   │       │       ├ VM 9000 golden image (own)    │
+│       ├ VM 9001 golden image   │       │       ├ VM 9000 golden image (own)    │
 │       ├ prod/stage/dev nodes   │       │       ├ CT 200: minio (state backend) │
 │       ├ poly-nodes (WIP)       │       │       ├ CT 300: vault (secrets)       │
-│       └ VM 100: workstation    │       │       ├ VM: ci-runner                 │
-│         (GUI-installed desktop)│       │       ├ VM 101: immich-node           │
-│                                │       │       └ NFS export → shared-storage   │
+│       ├ VM 100: workstation    │       │       └ VM: ci-runner                 │
+│       │ (GUI-installed desktop)│       │                                       │
+│       └ VM 101: immich-node    │       │                                       │
+│         (see note below)       │       │                                       │
 └──────────────┬─────────────────┘       └──────────────┬────────────────────────┘
                │                                        │
                └──────────────── corosync/knet ─────────┘
@@ -45,19 +46,29 @@ here (nested → bare metal, the flat-layout → modules refactor), see
                          └─────────────────────────┘
 ```
 
+> **`immich-node` lives on `pve-rog`, not `bare-pve`.** The environment's
+> own `terraform.tfvars`/README history assumed `bare-pve` (matching the
+> "must-have always-on services" node), but the actual Datacenter tree has
+> always shown VM 101 on `pve-rog`. Per the "what's deployed stays where it
+> is" rule, `environments/immich-node/variables.tf`'s `proxmox_node` default
+> (and the matching `proxmox_host_ip` used for the raw-disk `qm set` SSH
+> call) were fixed to `pve-rog` to match reality, rather than migrating the
+> VM to match the old docs. See
+> [environments/immich-node/README.md](environments/immich-node/README.md).
+
 Managed remotely from a laptop (Zenbook) over the LAN — Terraform, `qm`/`pveum`
 commands, and the web UI are all driven from there.
 
 **Two nodes, one cluster (`nexus-cluster`), plus a QDevice arbiter — both
 nodes bare metal.** `bare-pve` (`.30`) holds storage and anything that must
-not go down (MinIO, Vault, CI runner, immich-node); `pve-rog` (`.20`) keeps
-the "extra CPU/RAM for peak load" role and also hosts `workstation` — a
-GUI-installed desktop VM used as an actual personal computer (see
-[Other environments](docs/architecture.md#other-environments)). The full
-story of how both nodes ended up bare metal (one of them was nested Proxmox
-on a laptop for a while) is in [docs/history.md](docs/history.md); the full
-reasoning behind the cluster topology, the QDevice/Tailscale setup, the
-physical LAN quirks, and the state-backend placement is in
+not go down (MinIO, Vault, CI runner); `pve-rog` (`.20`) keeps the "extra
+CPU/RAM for peak load" role, hosts `workstation` — a GUI-installed desktop
+VM used as an actual personal computer — and, in practice, `immich-node`
+too (see the note above). The full story of how both nodes ended up bare
+metal (one of them was nested Proxmox on a laptop for a while) is in
+[docs/history.md](docs/history.md); the full reasoning behind the cluster
+topology, the QDevice/Tailscale setup, the physical LAN quirks, and the
+state-backend placement is in
 [docs/architecture.md](docs/architecture.md#architecture-in-depth).
 
 ## Stack
@@ -71,21 +82,25 @@ physical LAN quirks, and the state-backend placement is in
   for every environment except `workstation/`, which is installed by hand
   through the GUI installer instead (see
   [environments/workstation/README.md](environments/workstation/README.md))
-- **Ubuntu 24.04 (Noble) cloud image** — golden template, cloned per VM
+- **Ubuntu 24.04 (Noble) cloud image** — golden template, cloned per VM.
+  Each cluster node keeps its own local copy (VM 9000 on `bare-pve`, VM
+  9001 on `pve-rog`) — see [Node placement](#node-placement-endpoint--golden-image-resolution)
+  below for why every environment resolves both from `proxmox_node` alone
+  now, instead of a separate `template_vm_id` input.
 - **MinIO** (LXC, systemd daemon, no Docker) — S3-compatible Terraform state
   backend for every root module, independent of the runner and the node
   VMs; also serves as an internal binary mirror for tools blocked by
   regional restrictions (see [docs/architecture.md](docs/architecture.md#state-backend-lives-off-both))
 - **Vault** (LXC, systemd daemon, no Docker, raft/integrated storage) —
-  standing up on `bare-pve` (CT 300) as the secrets backend for CI.
-  `scripts/vault-lxc-init.sh` stands up the service and handles the
-  `mlock`/unseal mechanics (see `docs/troubleshooting.md`); a separate
-  `scripts/vault-approle-init.sh` configures an AppRole
-  (`terraform-provisioner` policy, `ci-runner` role) that the self-hosted
-  runner authenticates with in `pipeline.yml` to pull the Proxmox API
-  token, the CI SSH private key, the MinIO credentials, and the GitHub
-  runner PAT at job runtime — none of these live as plaintext GitHub
-  Actions secrets anymore. `/root/terraform-token.json` on the Proxmox
+  secrets backend for both CI and manual `apply`s. `scripts/vault-lxc-init.sh`
+  stands up the service; `scripts/vault-approle-init.sh` configures the
+  `ci-runner` AppRole for `pipeline.yml`; `scripts/vault-userpass-init.sh`
+  configures the `operator-manual-apply` policy/login for manual applies
+  from a laptop via `scripts/vault-apply-wrapper.sh`. Beyond the Proxmox
+  API token and MinIO credentials, Vault now also holds the two SSH public
+  keys every environment injects via cloud-init
+  (`proxmox/ssh-keys` → `vm_public_key`/`ci_public_key`) — see
+  [Secrets](#secrets) below. `/root/terraform-token.json` on the Proxmox
   host has been deleted now that its contents live in Vault
   (`proxmox/terraform-provider`).
 - **Ansible** — post-provision configuration, delegated to
@@ -96,6 +111,62 @@ physical LAN quirks, and the state-backend placement is in
   [environments/immich-node/README.md](environments/immich-node/README.md))
 - **SPICE (`qxl2`) + a local kiosk session** — `workstation/`'s display
   model (see [environments/workstation/README.md](environments/workstation/README.md))
+
+## Node placement: endpoint + golden-image resolution
+
+Every root module used to take `proxmox_endpoint` (and, where relevant,
+`template_vm_id`) as separate input variables — which meant a manual
+`terraform.tfvars` could silently point the provider at one node while
+cloning from the other node's golden image (the "unable to find
+configuration file for VM 9000 on node 'pve-rog'" class of bug in
+[docs/troubleshooting.md](docs/troubleshooting.md)). Both are now derived
+from `proxmox_node` alone, via a `locals.tf` present in every environment:
+
+```hcl
+locals {
+  proxmox_nodes = {
+    "bare-pve" = { endpoint = "https://192.168.100.30:8006/", template_vm_id = 9000 }
+    "pve-rog"  = { endpoint = "https://192.168.100.20:8006/", template_vm_id = 9001 }
+  }
+
+  proxmox_endpoint = local.proxmox_nodes[var.proxmox_node].endpoint
+  template_vm_id   = local.proxmox_nodes[var.proxmox_node].template_vm_id
+}
+```
+
+`proxmox_node` is the only thing that ever needs setting (and every
+environment already defaults it to wherever that environment's VM(s)
+actually live). For multi-VM environments (`nodes`, `poly-nodes`,
+`minecraft-node`), each `var.nodes` entry can still override
+`proxmox_node` per-VM — `template_node`/`template_vm_id` always resolve
+from that same per-entry value, so a VM's clone source can never drift
+from the node it's actually placed on.
+
+## Secrets
+
+Nothing environment-specific needs to be typed into `terraform.tfvars`
+anymore — every one of the six environments' `.tfvars.example` files is
+now just a comment block. `scripts/vault-apply-wrapper.sh`, sourced once
+from `~/.bashrc`, wraps the `terraform` command: the first time a plain
+`terraform plan`/`apply` runs inside one of this repo's environments, it
+fetches from Vault (CT 300) and exports as `TF_VAR_*`:
+
+- `proxmox_api_token` (`proxmox/terraform-provider`)
+- `vm_ssh_public_key` / `ci_ssh_public_key` (`proxmox/ssh-keys`)
+- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` for the MinIO state backend
+  (`proxmox/minio-credentials`)
+
+Only `minecraft-node`'s `playit_secret_key` isn't migrated yet — it still
+needs a manual `terraform.tfvars` (or `TF_VAR_playit_secret_key`) until
+that path exists in Vault. See `scripts/vault-apply-wrapper.sh`'s header
+and [docs/troubleshooting.md](docs/troubleshooting.md) for the one gotcha
+this wrapper has (a cached `TF_VAR_proxmox_api_token` from an old shell
+session can silently skip the SSH-key fetch — open a fresh terminal after
+pulling wrapper updates).
+
+`pipeline.yml` (CI) is unaffected by any of this — it authenticates as the
+separate `ci-runner` AppRole and never touches the operator's userpass
+login.
 
 ## Repo layout
 
@@ -134,6 +205,9 @@ scripts/
 │                                     #   golden image, thin-pool autoextend threshold
 ├── minio-lxc-init.sh                 # Proxmox-side (bare-pve): MinIO LXC (state backend)
 ├── vault-lxc-init.sh                 # Proxmox-side (bare-pve): Vault LXC (CT 300), manual unseal
+├── vault-approle-init.sh             # Vault: ci-runner AppRole (CI-only, pipeline.yml)
+├── vault-userpass-init.sh            # Vault: operator-manual-apply policy/login (laptop)
+├── vault-apply-wrapper.sh            # Sourced shell wrapper: auto-fetches secrets for manual apply
 ├── shared-storage-creation.sh        # Proxmox-side (bare-pve): NFS export prep
 ├── desktop-kiosk-setup.sh            # Proxmox-side (pve-rog): local SPICE kiosk for workstation
 └── register-github-runner.sh         # Registers the GitHub Actions runner agent on ci-runner
@@ -164,8 +238,9 @@ ssh root@<proxmox-ip> 'bash -s' < scripts/proxmox-init.sh
 Creates the `terraform@pve` user, a scoped `TerraformProv` role (full
 privilege list and reasoning in
 [docs/architecture.md#terraformprov-role](docs/architecture.md#terraformprov-role)),
-an API token, and the `ubuntu-cloud-template` (VM 9000) golden image. Also
-pins `/etc/resolv.conf`, enables the `snippets` content type on the `local`
+an API token, and the `ubuntu-cloud-template` golden image (VM 9000 on
+`bare-pve`, VM 9001 on `pve-rog` — run this once per node). Also pins
+`/etc/resolv.conf`, enables the `snippets` content type on the `local`
 datastore, and sets `activation { thin_pool_autoextend_threshold = 80 }` in
 `/etc/lvm/lvm.conf`. Idempotent.
 
@@ -200,20 +275,16 @@ mc mb local/tools --ignore-existing
 mc anonymous set download local/tools
 ```
 
-### 4. (Optional, WIP) Stand up Vault (on `bare-pve`)
+### 4. Stand up Vault (on `bare-pve`) and seed the ssh-key path
 
 ```bash
 ssh root@<proxmox-ip> 'bash -s' < scripts/vault-lxc-init.sh
 ```
 
-Creates CT 300 (Vault, statically addressed, raft/integrated storage — no
-external Consul needed for a single-node deploy). Not yet consuming any
-secret currently living on disk — this stands up the service itself. See
-[docs/architecture.md](docs/architecture.md) and the script header for the
-`mlock`/unseal reasoning, and
+Creates CT 300 (Vault, statically addressed, raft/integrated storage). See
+`scripts/vault-lxc-init.sh`'s header and
 [docs/troubleshooting.md](docs/troubleshooting.md#vault-mlock-enomem-in-unprivileged-lxc)
-for the `Failed to lock memory: cannot allocate memory` pitfall this
-script now guards against on unprivileged LXC.
+for the `mlock`/unseal mechanics.
 
 After the first run, initialize and unseal by hand (deliberately manual —
 no external KMS available in this lab for auto-unseal):
@@ -226,6 +297,29 @@ pct exec 300 -- env VAULT_ADDR=http://127.0.0.1:8200 vault operator unseal   # x
 
 Vault comes back **sealed** after every CT/host restart — repeat the
 `operator unseal` step manually each time.
+
+Then wire up both auth paths and seed the SSH keys every environment
+injects via cloud-init:
+
+```bash
+export VAULT_ADDR=http://192.168.100.200:8200
+
+./scripts/vault-approle-init.sh        # ci-runner AppRole, used by pipeline.yml
+./scripts/vault-userpass-init.sh       # operator-manual-apply policy + your login
+
+vault kv put proxmox/ssh-keys \
+  vm_public_key="$(cat ~/.ssh/<your-key>.pub)" \
+  ci_public_key="$(cat ~/.ssh/<ci-deploy-key>.pub)"
+
+vault kv get proxmox/ssh-keys          # confirm both fields landed
+```
+
+Then, once per shell session (or via `~/.bashrc`):
+
+```bash
+vault login -method=userpass username=<you>
+source scripts/vault-apply-wrapper.sh
+```
 
 ### 5. (Optional) Cluster the nodes and add a QDevice arbiter
 
@@ -269,12 +363,15 @@ for why the second command is separate and cluster-wide.
 
 ```bash
 cd environments/nodes/
-cp terraform.tfvars.example terraform.tfvars   # fill in endpoint, token, SSH keys
-export AWS_ACCESS_KEY_ID=<minio-user>
+export AWS_ACCESS_KEY_ID=<minio-user>       # or just `source scripts/vault-apply-wrapper.sh` once (step 4)
 export AWS_SECRET_ACCESS_KEY=<minio-password>
 terraform init
 terraform apply -parallelism=1
 ```
+
+No `terraform.tfvars` needed if `vault-apply-wrapper.sh` is sourced —
+`proxmox_api_token`/`vm_ssh_public_key`/`ci_ssh_public_key` are fetched
+automatically on first use in this directory.
 
 `-parallelism=1` is not cosmetic — see
 [docs/troubleshooting.md](docs/troubleshooting.md#concurrent-clones-unreliable)
@@ -284,9 +381,6 @@ for the disk-contention/timeout story.
 
 ```bash
 cd environments/runner/
-cp terraform.tfvars.example terraform.tfvars   # same values as the nodes tfvars
-export AWS_ACCESS_KEY_ID=<minio-user>
-export AWS_SECRET_ACCESS_KEY=<minio-password>
 terraform init
 terraform apply
 ```
@@ -297,8 +391,10 @@ for the incident that made this a hard rule.
 
 ### 9. (Optional, manual, as-needed) poly-nodes / minecraft-node / immich-node / workstation
 
-Same pattern as steps 7/8 — `cd` into the environment, copy the
-`.tfvars.example`, `terraform init`, `terraform apply`. None are wired into
+Same pattern as steps 7/8 — `cd` into the environment, `terraform init`,
+`terraform apply` (with `vault-apply-wrapper.sh` sourced). `minecraft-node`
+is the one exception still needing a manual `terraform.tfvars` for
+`playit_secret_key` (see [Secrets](#secrets) above). None are wired into
 `pipeline.yml`. `immich-node` and `workstation` each need a manual pass
 after the first `apply` that Terraform can't reach (guest-OS config, GUI
 install) — see their own READMEs:
@@ -325,13 +421,18 @@ rather than silently picking up whatever `swarm-lab`'s `main` happens to be
 at trigger time. See [swarm-lab's own README](../swarm-lab/README.md#cicd)
 for how its application images are versioned separately.
 
-Required repo secrets: `PROXMOX_ENDPOINT`, `CI_SSH_PUBLIC_KEY`,
-`VM_SSH_PUBLIC_KEY`, `VAULT_ROLE_ID`, `VAULT_SECRET_ID`. Everything else
-the pipeline needs (the Proxmox API token, the CI SSH private key, MinIO
-credentials, the GitHub runner PAT) is fetched from Vault at job runtime
-via the `ci-runner` AppRole — see `scripts/vault-approle-init.sh` and the
-`Fetch secrets from Vault` step in both `provision` and `deploy` jobs of
-`pipeline.yml`.
+Required repo secrets: `VAULT_ROLE_ID`, `VAULT_SECRET_ID`. Everything the
+pipeline needs (the Proxmox API token, the CI SSH private/public keys,
+MinIO credentials, the GitHub runner PAT) is fetched from Vault at job
+runtime via the `ci-runner` AppRole — see `scripts/vault-approle-init.sh`
+and the `Fetch secrets from Vault` step in both `provision` and `deploy`
+jobs of `pipeline.yml`. `PROXMOX_ENDPOINT`/`CI_SSH_PUBLIC_KEY`/
+`VM_SSH_PUBLIC_KEY` are no longer read from GitHub Secrets — the endpoint
+is derived from `proxmox_node` (see
+[Node placement](#node-placement-endpoint--golden-image-resolution) above)
+and both public keys now come from Vault's `proxmox/ssh-keys` path,
+matching the manual-apply path. The old repo secrets can be removed if
+nothing else references them.
 
 ## Status
 
@@ -339,7 +440,7 @@ via the `ci-runner` AppRole — see `scripts/vault-approle-init.sh` and the
       both bare metal — plus a QDevice arbiter on the Zenbook
 - [x] `bpg/proxmox` provider authenticated (API token + SSH key)
 - [x] Golden image template (cloud-init–ready Ubuntu 24.04), present on
-      both nodes
+      both nodes (VM 9000 on `bare-pve`, VM 9001 on `pve-rog`)
 - [x] End-to-end `terraform apply` — clone, cloud-init, guest agent, IP
       assignment all working
 - [x] Runner split into an independent root module with its own backend
@@ -366,7 +467,9 @@ via the `ci-runner` AppRole — see `scripts/vault-approle-init.sh` and the
 - [x] `environments/minecraft-node` added — isolated node, manual apply
 - [x] `environments/poly-nodes` added — WIP, blocked on a flaky HDD
 - [x] `environments/immich-node` added — Immich via `docker compose` on a
-      dedicated `bare-pve` VM
+      dedicated VM, actually running on `pve-rog` (docs/tfvars previously
+      assumed `bare-pve` — corrected to match the deployed reality, see
+      the architecture note above)
 - [x] `environments/workstation` added — GUI-installed Ubuntu Desktop VM
       on `pve-rog`, local SPICE kiosk
 - [x] Dedicated hardware acquired for `bare-pve`, and `pve-rog`
@@ -380,21 +483,25 @@ via the `ci-runner` AppRole — see `scripts/vault-approle-init.sh` and the
 - [x] `TerraformProv` role/ACLs live in `/etc/pve` (pmxcfs), cluster-wide —
       no per-node re-verification needed
 - [x] Vault (CT 300) stood up on `bare-pve` — LXC, systemd, raft storage,
-      `mlock` genuinely enforced (`setcap cap_ipc_lock` on the binary plus
-      `lxc.prlimit.memlock: unlimited` in the CT's Proxmox-side config —
-      the capability alone isn't sufficient in an unprivileged LXC's user
-      namespace, see
-      [docs/troubleshooting.md](docs/troubleshooting.md#vault-mlock-enomem-in-unprivileged-lxc)),
-      initialized and unsealed. **Wired into the CI pipeline** via an
-      AppRole (`scripts/vault-approle-init.sh`) — `pipeline.yml`'s
-      `provision` and `deploy` jobs authenticate as the `ci-runner` role
-      and pull the Proxmox API token, CI SSH private key, MinIO
-      credentials, and GitHub runner PAT at job runtime, replacing five
-      plaintext GitHub Actions secrets. `/root/terraform-token.json` has
-      been removed from both Proxmox hosts. Manual-apply environments
-      (`runner`, `poly-nodes`, `minecraft-node`, `immich-node`,
-      `workstation`) still read `terraform.tfvars` locally — not yet
-      migrated, tracked as a possible follow-up.
+      `mlock` genuinely enforced, initialized and unsealed. Wired into
+      both the CI pipeline (`ci-runner` AppRole) and manual applies
+      (`operator-manual-apply` userpass policy + `vault-apply-wrapper.sh`).
+      `/root/terraform-token.json` removed from both Proxmox hosts.
+- [x] **Every environment's `proxmox_endpoint`/`template_vm_id` are now
+      derived from `proxmox_node` via a per-environment `locals.tf`** —
+      no environment takes either as a separate input variable anymore,
+      closing the class of bug where the provider endpoint and the golden
+      image clone source could silently disagree (see
+      [Node placement](#node-placement-endpoint--golden-image-resolution)
+      above and the `--link0`-adjacent entries in
+      [docs/troubleshooting.md](docs/troubleshooting.md)).
+- [x] **SSH public keys (`vm_ssh_public_key`/`ci_ssh_public_key`) migrated
+      into Vault** (`proxmox/ssh-keys`) — `scripts/vault-apply-wrapper.sh`
+      fetches both alongside the API token and MinIO credentials.
+      Manual-apply environments (`runner`, `poly-nodes`, `minecraft-node`,
+      `immich-node`, `workstation`) no longer need a filled-in
+      `terraform.tfvars` at all, except `minecraft-node`'s
+      `playit_secret_key` (not yet in Vault, tracked as a follow-up).
 - [x] `immich-node`'s recovery-disk bind is Terraform-managed; what remains
       manual is guest-OS-level config — see
       [environments/immich-node/README.md](environments/immich-node/README.md)
