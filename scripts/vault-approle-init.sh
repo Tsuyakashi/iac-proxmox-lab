@@ -11,6 +11,9 @@ path "proxmox/data/terraform-provider" {
 path "proxmox/data/ci-ssh-key" {
   capabilities = ["read"]
 }
+path "proxmox/data/ssh-keys" {
+  capabilities = ["read"]
+}
 path "proxmox/data/minio-credentials" {
   capabilities = ["read"]
 }
