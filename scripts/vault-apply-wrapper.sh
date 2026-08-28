@@ -3,15 +3,18 @@
 # scripts/vault-apply-wrapper.sh
 #
 # Source this once (e.g. from ~/.bashrc) and every plain `terraform apply`/
-# `plan`/etc. you type afterward auto-fetches proxmox_api_token + MinIO
-# state-backend creds from Vault (CT 300) the first time it's needed in a
-# given shell session — no separate command to remember, no alias to type
-# instead of `terraform`. Just:
+# `plan`/etc. you type afterward auto-fetches proxmox_api_token, the SSH
+# public keys, and MinIO state-backend creds from Vault (CT 300) the first
+# time it's needed in a given shell session — no separate command to
+# remember, no alias to type instead of `terraform`. Just:
 #
 #   echo 'source /path/to/scripts/vault-apply-wrapper.sh' >> ~/.bashrc
 #
 # then open a new terminal, cd into any of this repo's environments/*, and
-# run terraform normally.
+# run terraform normally. Nothing in terraform.tfvars is needed for any of
+# these environments anymore — proxmox_endpoint/template_vm_id are now
+# derived from proxmox_node inside each environment's locals.tf, and the
+# API token / SSH keys / MinIO creds all come from here.
 #
 # How it decides whether to touch Vault at all: the terraform() function
 # below only fires the Vault fetch when the current directory's
@@ -30,9 +33,12 @@
 #     expires. NOTE: a root token also passes the `vault token lookup`
 #     check below, since it's valid for everything — but using it
 #     defeats the point of the narrower operator-manual-apply policy
-#     (root can read every path in Vault, not just the two this repo
-#     needs). Prefer a userpass login day to day; save the root token
-#     for actual Vault administration (unseal, policy changes, etc).
+#     (root can read every path in Vault, not just what this repo needs).
+#     Prefer a userpass login day to day; save the root token for actual
+#     Vault administration (unseal, policy changes, etc).
+#   - proxmox/ssh-keys (vm_public_key / ci_public_key fields) must exist
+#     in Vault, and operator-manual-apply's policy must grant read on
+#     proxmox/data/ssh-keys — see scripts/vault-userpass-init.sh.
 #   - minecraft-node only: also needs proxmox/minecraft-playit-key in
 #     Vault (not yet migrated as of writing — playit_secret_key still
 #     comes from terraform.tfvars there until that KV path exists; the
@@ -91,14 +97,15 @@ _tfv_fetch_secrets() {
     TF_VAR_proxmox_api_token="$(vault kv get -field=api_token proxmox/terraform-provider)" || return 1
     export TF_VAR_proxmox_api_token
 
+    TF_VAR_vm_ssh_public_key="$(vault kv get -field=vm_public_key proxmox/ssh-keys)" || return 1
+    TF_VAR_ci_ssh_public_key="$(vault kv get -field=ci_public_key proxmox/ssh-keys)" || return 1
+    export TF_VAR_vm_ssh_public_key
+    export TF_VAR_ci_ssh_public_key
+
     AWS_ACCESS_KEY_ID="$(vault kv get -field=access_key proxmox/minio-credentials)" || return 1
     AWS_SECRET_ACCESS_KEY="$(vault kv get -field=secret_key proxmox/minio-credentials)" || return 1
     export AWS_ACCESS_KEY_ID
     export AWS_SECRET_ACCESS_KEY
-    
-    TF_VAR_vm_ssh_public_key="$(vault kv get -field=vm_public_key proxmox/ssh-keys)" || return 1
-    TF_VAR_ci_ssh_public_key="$(vault kv get -field=ci_public_key proxmox/ssh-keys)" || return 1
-    export TF_VAR_vm_ssh_public_key TF_VAR_ci_ssh_public_key
 
     # minecraft-node needs one more secret this function doesn't fetch yet —
     # warn loud instead of letting terraform prompt for it interactively.

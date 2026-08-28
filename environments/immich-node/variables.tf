@@ -1,7 +1,3 @@
-variable "proxmox_endpoint" {
-  type = string
-}
-
 variable "proxmox_api_token" {
   type      = string
   sensitive = true
@@ -13,14 +9,9 @@ variable "proxmox_insecure" {
 }
 
 variable "proxmox_node" {
-  description = "Target Proxmox node name"
+  description = "Target Proxmox node name — VM 101 живёт на pve-rog по факту (см. Datacenter tree), не bare-pve, как было раньше в дефолте."
   type        = string
-  default     = "bare-pve"
-}
-
-variable "template_vm_id" {
-  type    = number
-  default = 9000
+  default     = "pve-rog"
 }
 
 variable "vm_ssh_public_key" {
@@ -37,9 +28,9 @@ variable "gateway" {
 }
 
 variable "proxmox_host_ip" {
-  description = "IP хоста bare-pve для ssh qm set (raw disk passthrough не заводится через provider)"
+  description = "IP хоста для ssh qm set (raw disk passthrough не заводится через provider). Синхронизирован с var.proxmox_node — если поменяешь ноду размещения, поменяй и этот IP."
   type        = string
-  default     = "192.168.100.30"
+  default     = "192.168.100.20"
 }
 
 variable "nodes" {

@@ -17,9 +17,10 @@
 #   - operator-manual-apply's policy is intentionally narrower: no
 #     ci-ssh-key, no github-runner-pat — see the path list below. A
 #     manual `terraform apply` from a laptop only ever needs the Proxmox
-#     API token and the MinIO (state backend) credentials; the CI SSH key
-#     and GitHub PAT are pipeline.yml-only concerns (Ansible deploy /
-#     runner self-registration), never touched by vault-apply-wrapper.sh.
+#     API token, the SSH public keys, and the MinIO (state backend)
+#     credentials; the CI SSH *private* key and GitHub PAT are
+#     pipeline.yml-only concerns (Ansible deploy / runner
+#     self-registration), never touched by vault-apply-wrapper.sh.
 #
 # Run once against Vault (CT 300), same way as vault-approle-init.sh:
 #   VAULT_ADDR=http://192.168.100.200:8200 ./scripts/vault-userpass-init.sh
@@ -33,22 +34,31 @@
 # apply plus troubleshooting on immich-node/workstation can run well past
 # an hour; re-authenticating mid-troubleshooting is just friction, not a
 # meaningful security win for a LAN-only lab Vault.
+#
+# NOTE: proxmox/data/ssh-keys must actually contain the two public keys
+# before scripts/vault-apply-wrapper.sh can read them:
+#   vault kv put proxmox/ssh-keys \
+#     vm_public_key="$(cat ~/.ssh/<your-key>.pub)" \
+#     ci_public_key="$(ssh-keygen -y -f <ci-private-key-path>)"
+# This script only grants the read policy — it doesn't seed the values.
 
 set -e
 : "${VAULT_ADDR:?set VAULT_ADDR before running (e.g. http://192.168.100.200:8200)}"
 
 vault auth enable userpass 2>/dev/null || true
 
-# NOTE: no ci-ssh-key / github-runner-pat paths here — see header. If a
-# manual environment ever needs to pull a secret this policy doesn't grant
-# (e.g. minecraft-node's playit key, once it's migrated into Vault — see
-# vault-apply-wrapper.sh's warning about that), add the path here rather
-# than widening ci-runner's terraform-provisioner policy.
+# ssh-keys added here — the two SSH public keys (not secret by nature, but
+# centralizing them in Vault means no environment's terraform.tfvars needs
+# to carry them anymore, same reasoning as the API token/MinIO creds. No
+# ci-ssh-key (the private key) / github-runner-pat here — see header.
 vault policy write operator-manual-apply - <<EOF
 path "proxmox/data/terraform-provider" {
   capabilities = ["read"]
 }
 path "proxmox/data/minio-credentials" {
+  capabilities = ["read"]
+}
+path "proxmox/data/ssh-keys" {
   capabilities = ["read"]
 }
 EOF
