@@ -128,8 +128,21 @@ if [ "${_tfv_sourced}" -eq 1 ]; then
         # Только для этого репозитория — распознаём по variables.tf,
         # требующему proxmox_api_token. Любой другой terraform-проект
         # на машине идёт мимо Vault как обычно.
+        #
+        # Проверяем все три TF_VAR_*, за которые отвечает
+        # _tfv_fetch_secrets, а не только proxmox_api_token — иначе шелл
+        # с уже закэшированным (из старой сессии) TF_VAR_proxmox_api_token,
+        # но без ssh-ключей (например, если враппер обновили уже после
+        # того, как токен закэшировался в этом шелле), тихо пропускает
+        # фетч новых секретов и terraform уходит в интерактивный запрос
+        # переменных. См. docs/troubleshooting.md
+        # #vault-apply-wrapper-stale-token-skips-ssh-key-fetch — это тот
+        # самый баг, задокументированный там как "landed in the wrapper",
+        # но реально попавший в код только сейчас.
         if [ -f "./variables.tf" ] && grep -q "proxmox_api_token" ./variables.tf 2>/dev/null; then
-            if [ -z "${TF_VAR_proxmox_api_token:-}" ]; then
+            if [ -z "${TF_VAR_proxmox_api_token:-}" ] || \
+               [ -z "${TF_VAR_vm_ssh_public_key:-}" ] || \
+               [ -z "${TF_VAR_ci_ssh_public_key:-}" ]; then
                 _tfv_fetch_secrets || return $?
             fi
         fi
