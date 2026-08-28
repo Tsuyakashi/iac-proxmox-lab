@@ -59,6 +59,15 @@ module "ci_runner" {
     "curl -o /usr/local/bin/mc https://dl.min.io/aistor/mc/release/linux-amd64/mc",
     "chmod +x /usr/local/bin/mc",
     "for i in 1 2 3; do ping -c1 -W2 192.168.100.3 && break || sleep 2; done || true",
+    # write_files entries land here as root:root (see the module's
+    # write_files/chown pairing note in the base template) — but that
+    # chown only fixes files this module explicitly writes, not the
+    # home directory itself. /home/ubuntu ended up root-owned on a fresh
+    # clone, which meant `curl -o /usr/local/bin/...` above actually
+    # worked (root-owned target dir), but ANY runcmd step that later
+    # writes into $HOME as ubuntu (e.g. actions-runner install, ~/.ssh)
+    # failed with a bare "Permission denied" — traced to /home/ubuntu
+    # itself not being chowned to the user cloud-init created it for.
     "chown ubuntu:ubuntu /home/ubuntu"
   ]
 }
