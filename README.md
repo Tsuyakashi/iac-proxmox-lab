@@ -28,7 +28,7 @@ here (nested → bare metal, the flat-layout → modules refactor), see
 │  └── vmbr0 ─────────┐          │       │  └── vmbr0 ─────────┐                 │
 │       ├ VM 9001 golden image   │       │       ├ VM 9000 golden image (own)    │
 │       ├ prod/stage/dev nodes   │       │       ├ CT 200: minio (state backend) │
-│       ├ poly-nodes (WIP)       │       │       ├ CT 300: vault (secrets)       │
+│       ├ poly-nodes             │       │       ├ CT 300: vault (secrets)       │
 │       ├ VM 100: workstation    │       │       └ VM: ci-runner                 │
 │       │ (GUI-installed desktop)│       │                                       │
 │       └ VM 101: immich-node    │       │                                       │
@@ -191,7 +191,7 @@ modules/
 environments/
 ├── nodes/                            # ROOT MODULE — prod/stage/dev nodes (in CI)
 ├── runner/                           # ROOT MODULE — CI runner, own state/lifecycle
-├── poly-nodes/                       # ROOT MODULE — infra for poly-ci, manual apply, WIP
+├── poly-nodes/                       # ROOT MODULE — infra for poly-ci, manual apply
 ├── minecraft-node/                   # ROOT MODULE — isolated Minecraft node, manual apply
 ├── immich-node/                      # ROOT MODULE — Immich (docker compose), manual apply
 │   └── README.md                     #   cpu_type / recovery-ro details specific to this env
@@ -465,7 +465,11 @@ nothing else references them.
       overcommit is structural — see
       [docs/troubleshooting.md](docs/troubleshooting.md#lvm-thin-pool-exhaustion)
 - [x] `environments/minecraft-node` added — isolated node, manual apply
-- [x] `environments/poly-nodes` added — WIP, blocked on a flaky HDD
+- [x] `environments/poly-nodes` added — same `proxmox_node`-derived
+      placement as every other environment (VM 9001 on `pve-rog`'s own
+      `local-lvm`, no separate datastore); manual apply, not wired into
+      `pipeline.yml` — `poly-ci`'s own topology/state, spin-up/test/
+      tear-down workflow rather than always-up infra
 - [x] `environments/immich-node` added — Immich via `docker compose` on a
       dedicated VM, actually running on `pve-rog` (docs/tfvars previously
       assumed `bare-pve` — corrected to match the deployed reality, see
