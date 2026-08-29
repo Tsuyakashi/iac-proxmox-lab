@@ -13,7 +13,7 @@ variable "proxmox_insecure" {
 variable "proxmox_node" {
   description = "Target Proxmox node name"
   type        = string
-  default     = "bare-pve"
+  default     = "pve-rog"
 }
 
 variable "vm_ssh_public_key" {
@@ -35,13 +35,11 @@ variable "gateway" {
 variable "nodes" {
   description = "Nodes topology. mac + ip are both pinned — ip is applied via cloud-init static config, not DHCP, so Proxmox/router never gets a say in which address a node ends up with."
   type = map(object({
-    tag_name          = string
-    memory            = number
-    cores             = number
-    mac               = string
-    ip                = string # CIDR, e.g. "192.168.100.21/24"
-    datastore_id_disk = optional(string, "local-lvm")
-    disk_size         = optional(number, 10)
+    tag_name = string
+    memory   = number
+    cores    = number
+    mac      = string
+    ip       = string # CIDR, e.g. "192.168.100.21/24"
   }))
   default = {
     "runner-node"     = { tag_name = "runner", memory = 2048, cores = 2, mac = "BC:24:11:0F:A0:B3", ip = "192.168.100.110/24" }

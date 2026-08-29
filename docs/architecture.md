@@ -83,11 +83,21 @@ wired into `pipeline.yml` — all applied manually, on demand:
 
 - **`poly-nodes/`** — infra for a separate project,
   [`poly-ci`](https://github.com/tsuyakashi/poly-ci): runner/prod/monitoring
-  nodes, structured the same way as `nodes/`. Currently on hold — clones
-  from a second golden image (VM 9001) on `hdd-storage` instead of the main
-  `local-lvm` pool, and that disk is currently flaky, so 9001/`poly-nodes`
-  is WIP and bootstrapped by hand for now (same pattern as
-  `proxmox-init.sh` uses for 9000, just not yet scripted).
+  nodes, structured the same way as `nodes/`. Node placement (API endpoint
+  + golden image) resolves through `locals.tf` exactly like every other
+  environment — `bare-pve` → template 9000, `pve-rog` → template 9001, both
+  on that node's own `local-lvm`. There is no separate `hdd-storage`
+  datastore anymore: an earlier iteration of this environment cloned VM
+  9001 from a physical HDD in the pre-cluster nested setup, and that disk
+  was flaky enough to keep this environment WIP for a while — that HDD has
+  since been wiped and repurposed onto different hardware entirely, and
+  9001 is just `pve-rog`'s regular golden image now, same as every other
+  environment that clones from it. The remaining reasons this stays a
+  separate, manually-applied environment are organizational, not
+  infrastructural: it's `poly-ci`'s own topology/state, not part of
+  `swarm-lab`'s always-up infra, and it follows a "spin up, test, tear
+  down" workflow rather than staying persistently live — same as
+  `minecraft-node` below, and why neither is wired into `pipeline.yml`.
 - **`minecraft-node/`** — a single isolated node (own NAT segment, no
   access to the rest of the LAN) running a Minecraft server + playit.gg
   tunnel. Short-lived/situational by nature, not part of the core lab.

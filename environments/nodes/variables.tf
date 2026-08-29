@@ -13,7 +13,7 @@ variable "proxmox_insecure" {
 variable "proxmox_node" {
   description = "Target Proxmox node name"
   type        = string
-  default     = "bare-pve"
+  default     = "pve-rog"
 }
 
 variable "vm_ssh_public_key" {
