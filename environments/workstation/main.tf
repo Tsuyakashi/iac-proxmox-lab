@@ -199,7 +199,14 @@ resource "proxmox_virtual_environment_vm" "workstation" {
     # вовремя. started тоже уходит в ignore_changes: включение/выключение
     # остаётся только на on_boot (ребут хоста) и ручной qm start/stop —
     # terraform apply больше не трогает состояние питания вообще.
-    ignore_changes = [usb, cpu, hook_script_file_id, started]
+    #
+    # hostpci — тот же класс, что usb/hookscript выше: "only root can
+    # set 'hostpci0' config for non-mapped devices". Прописывается через
+    # null_resource.gpu_bind по SSH, но раз атрибут вообще смоделирован
+    # в схеме провайдера, refresh видит физически стоящий hostpci0 и
+    # пытается его снять той же запрещённой командой без этого
+    # ignore_changes.
+    ignore_changes = [usb, cpu, hook_script_file_id, started, hostpci]
   }
 }
 
