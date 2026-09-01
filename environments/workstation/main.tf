@@ -47,6 +47,13 @@
 # самой ноды pve-rog — контролируется полем on_boot в var.nodes, Terraform
 # не проверяет, что true выставлено ровно у одной записи (см. variables.tf).
 
+# Причина disk_interface (см. variables.tf): Windows-инсталлятор не видит
+# диск на scsi0/virtio-scsi без загрузки стороннего драйвера ("Нам не
+# удалось найти драйверы" на шаге разметки) — у Linux-гостя virtio в ядре
+# из коробки, у Windows нет. sata0 работает без доп. драйверов у обеих ОС,
+# поэтому Windows-запись сидит на нём, Ubuntu остаётся на scsi0 (раз уже
+# так стояло и работало).
+
 resource "proxmox_virtual_environment_vm" "workstation" {
   for_each = var.nodes
 
@@ -69,7 +76,7 @@ resource "proxmox_virtual_environment_vm" "workstation" {
 
   disk {
     datastore_id = each.value.datastore_id_disk
-    interface    = "scsi0"
+    interface    = each.value.disk_interface
     size         = each.value.disk_size
     file_format  = "raw"
   }
@@ -90,8 +97,8 @@ resource "proxmox_virtual_environment_vm" "workstation" {
   # ребут снова закинет в инсталлятор.
   boot_order = (
     each.value.iso_file_id != null && each.value.boot_from_iso
-    ? ["ide3", "scsi0"]
-    : ["scsi0", "ide3"]
+    ? ["ide3", each.value.disk_interface]
+    : [each.value.disk_interface, "ide3"]
   )
 
   network_device {

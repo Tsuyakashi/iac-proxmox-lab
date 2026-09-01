@@ -52,6 +52,13 @@ variable "nodes" {
                 "l26" для Linux, "win10" для Windows 10/11-гостя. Влияет
                 на дефолтные оптимизации QEMU (ACPI/HPET и т.п.), не
                 декоративное поле.
+    disk_interface — "scsi0" (дефолт, virtio-scsi) для Linux-гостей — в
+                ядре есть драйвер из коробки. Для Windows нужен "sata0" —
+                у Windows-инсталлятора нет встроенного virtio-драйвера,
+                без него шаг разметки диска в установщике не видит диск
+                вообще ("Нам не удалось найти драйверы"). Установка
+                стороннего virtio-драйвера с отдельного ISO — тоже
+                вариант, но sata0 проще и не требует второго cdrom.
     vga_type   — "qxl2" — SPICE, 2 виртуальные головы, программный рендер
                 (см. корневой README/troubleshooting — virtio-gl оказался
                 single-head в этой сборке QEMU). Для Windows тоже qxl2 —
@@ -80,6 +87,7 @@ variable "nodes" {
     datastore_id_disk = optional(string, "local-lvm")
     disk_size         = optional(number, 64)
     os_type           = optional(string, "l26")
+    disk_interface    = optional(string, "scsi0")
     vga_type          = optional(string, "qxl2")
     vga_memory        = optional(number, 64)
     iso_file_id       = optional(string, null)
@@ -108,16 +116,17 @@ variable "nodes" {
       usb_devices   = ["13d3:5188", "0c45:5004", "08bb:2902", "046d:0825"]
     }
     "windows-workstation" = {
-      tag_name      = "workstation-win",
-      memory        = 8192,
-      cores         = 4,
-      os_type       = "win10",
-      vga_type      = "qxl2",
-      mac           = "BC:24:11:7F:3D:19",
-      iso_file_id   = "local:iso/Win10_22H2_Russian_x64v1.iso",
-      boot_from_iso = true,
-      on_boot       = true,
-      usb_devices   = ["13d3:5188", "0c45:5004", "08bb:2902", "046d:0825"]
+      tag_name       = "workstation-win",
+      memory         = 8192,
+      cores          = 4,
+      os_type        = "win10",
+      disk_interface = "sata0",
+      vga_type       = "qxl2",
+      mac            = "BC:24:11:7F:3D:19",
+      iso_file_id    = "local:iso/Win10_22H2_Russian_x64v1.iso",
+      boot_from_iso  = true,
+      on_boot        = true,
+      usb_devices    = ["13d3:5188", "0c45:5004", "08bb:2902", "046d:0825"]
     }
   }
 }
