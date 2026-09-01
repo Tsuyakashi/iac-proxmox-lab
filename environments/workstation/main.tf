@@ -190,7 +190,16 @@ resource "proxmox_virtual_environment_vm" "workstation" {
     # через null_resource.hookscript_bind, provider увидит его при
     # refresh и попытается снять той же запрещённой командой без этого
     # ignore_changes.
-    ignore_changes = [usb, cpu, hook_script_file_id]
+    #
+    # started — провайдер по умолчанию хочет VM running=true, если этот
+    # атрибут не задан явно. Из-за этого самый первый apply после
+    # добавления hookscript_bind успел включить обе VM ДО того, как
+    # хук-скрипт на них появился (null_resource выполняется после
+    # модификации самой VM в том же apply) — мьютекс не успел сработать
+    # вовремя. started тоже уходит в ignore_changes: включение/выключение
+    # остаётся только на on_boot (ребут хоста) и ручной qm start/stop —
+    # terraform apply больше не трогает состояние питания вообще.
+    ignore_changes = [usb, cpu, hook_script_file_id, started]
   }
 }
 
