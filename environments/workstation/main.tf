@@ -15,10 +15,14 @@
 # датасторе + виртуальный cdrom — надёжный путь, тот же, что
 # рассматривался изначально.
 #
-# qxl2 вместо GPU passthrough — см. обсуждение в чате (Kepler reset
-# bug без софтового фикса + драйвер 470.xxx официально EOL под свежие
-# ядра; virtio-gl пробовали первым, но он single-head в этой сборке
-# QEMU — см. README). Юзкейс — браузер/офис/редкие казуальные 2D-игры.
+# GPU passthrough для windows-workstation — см. gpu_pci_id в variables.tf
+# и scripts/gpu-passthrough-setup.sh. Изначально (см. корневой README)
+# passthrough был отклонён целиком из-за Kepler reset bug — решение
+# пересмотрено сознательно, с принятием trade-off'а: после сессии с GPU
+# нужен полный ребут хоста, не просто qm stop/start (карта не гарантирует
+# штатный сброс). Headless — у 770M на этом Optimus-ноутбуке нет
+# физического видеовыхода, смотришь через RDP внутри Windows, не через
+# консоль/SPICE.
 #
 # USB-периферия (клавиатура/мышь/веб-камера) — это отдельная история от
 # GPU passthrough и его reset bug'ом никак не связана: обычный host-USB
@@ -27,11 +31,10 @@
 # полноправный API-токен — поэтому это тоже null_resource + qm set по
 # SSH (root@pam), а не декларативный usb{} блок провайдера.
 #
-# Аудио — через SPICE audio channel (ich9-intel-hda + driver "spice"), не
-# через отдельный USB-проброс звуковой карты: спайс сам тащит звук на
-# клиента (тот же remote-viewer на хосте из scripts/desktop-kiosk-setup.sh),
-# не требует, чтобы в госте была видна какая-то конкретная физическая
-# аудио-железка.
+# Аудио — через SPICE audio channel (ich9-intel-hda + driver "spice"),
+# опционально (spice_audio в variables.tf) — нужен только тем VM, куда
+# реально заходишь через SPICE/kiosk. windows-workstation его не
+# использует — звук идёт через RDP.
 #
 # Отдельный root-модуль/state (тот же паттерн "Two independent root
 # modules, on purpose" из корневого README) — desktop VM(и) не зависят от
@@ -149,12 +152,16 @@ resource "proxmox_virtual_environment_vm" "workstation" {
     memory = each.value.vga_memory
   }
 
-  # SPICE audio channel — звук идёт клиенту (remote-viewer на самом
-  # pve-rog, см. scripts/desktop-kiosk-setup.sh), без проброса физической
-  # звуковой карты хоста внутрь гостя.
-  audio_device {
-    device = "ich9-intel-hda"
-    driver = "spice"
+  # SPICE audio channel — только если реально смотришь через SPICE
+  # (kiosk/remote-viewer). Для windows-workstation выключено (spice_audio
+  # = false) — звук идёт через сам RDP, отдельный SPICE-audio-канал
+  # никем не потребляется.
+  dynamic "audio_device" {
+    for_each = each.value.spice_audio ? [1] : []
+    content {
+      device = "ich9-intel-hda"
+      driver = "spice"
+    }
   }
 
   operating_system {
@@ -162,7 +169,11 @@ resource "proxmox_virtual_environment_vm" "workstation" {
   }
 
   lifecycle {
-    ignore_changes = [usb]
+    # cpu добавляется в ignore_changes для VM с hide_hypervisor = true —
+    # null_resource.cpu_hidden ниже пишет "-cpu host,hidden=1" по SSH в
+    # обход провайдера; без ignore_changes каждый terraform apply откатывал
+    # бы это обратно на голый "host" (тот же класс проблемы, что и usb).
+    ignore_changes = each.value.hide_hypervisor ? [usb, cpu] : [usb]
   }
 }
 
@@ -178,6 +189,18 @@ locals {
       }
     ]
   ])
+
+  gpu_bindings = {
+    for k, v in var.nodes : k => {
+      proxmox_node = coalesce(v.proxmox_node, var.proxmox_node)
+      pci_id       = v.gpu_pci_id
+    } if v.gpu_pci_id != null
+  }
+
+  hidden_cpu_bindings = {
+    for k, v in var.nodes : k => coalesce(v.proxmox_node, var.proxmox_node)
+    if v.hide_hypervisor
+  }
 }
 
 # Реальные USB-устройства (host=vendorid:productid) можно задать только
@@ -195,6 +218,50 @@ resource "null_resource" "usb_bind" {
 
   provisioner "local-exec" {
     command = "ssh root@${each.value.proxmox_node} qm set ${proxmox_virtual_environment_vm.workstation[each.value.node_key].vm_id} -usb${each.value.usb_index} host=${each.value.device},usb3=1"
+  }
+
+  depends_on = [proxmox_virtual_environment_vm.workstation]
+}
+
+# GPU passthrough (hostpci0) — тот же паттерн, что usbN/recovery_ro_bind:
+# PCI passthrough Proxmox тоже не пускает через API-токен, только
+# root@pam по SSH. bus:slot без .function захватывает видео- и
+# HDMI-audio функции одним блоком. Headless (без x-vga) — см.
+# variables.tf про Optimus/отсутствие физического видеовыхода у 770M.
+#
+# ВАЖНО: требует одноразовой настройки хоста ДО первого apply с этим
+# полем — scripts/gpu-passthrough-setup.sh (IOMMU, vfio-pci bind,
+# блэклист nouveau), иначе qm set пройдёт, но VM не застартует (карта
+# ещё занята host-драйвером).
+resource "null_resource" "gpu_bind" {
+  for_each = local.gpu_bindings
+
+  triggers = {
+    vm_id  = proxmox_virtual_environment_vm.workstation[each.key].vm_id
+    pci_id = each.value.pci_id
+  }
+
+  provisioner "local-exec" {
+    command = "ssh root@${each.value.proxmox_node} qm set ${proxmox_virtual_environment_vm.workstation[each.key].vm_id} -hostpci0 ${each.value.pci_id}"
+  }
+
+  depends_on = [proxmox_virtual_environment_vm.workstation]
+}
+
+# Обход анти-виртуалочной защиты GeForce-драйвера (Code 43 в диспетчере
+# устройств) — тот же null_resource+SSH подход. Идёт отдельным ресурсом
+# от gpu_bind, а не одной командой с ним, чтобы работать и для случая,
+# когда карту не пробрасываешь, но по какой-то причине hide_hypervisor
+# всё равно нужен (не текущий кейс, но поля независимы в variables.tf).
+resource "null_resource" "cpu_hidden" {
+  for_each = local.hidden_cpu_bindings
+
+  triggers = {
+    vm_id = proxmox_virtual_environment_vm.workstation[each.key].vm_id
+  }
+
+  provisioner "local-exec" {
+    command = "ssh root@${each.value} qm set ${proxmox_virtual_environment_vm.workstation[each.key].vm_id} -cpu host,hidden=1"
   }
 
   depends_on = [proxmox_virtual_environment_vm.workstation]
