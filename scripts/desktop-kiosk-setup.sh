@@ -25,7 +25,7 @@
 
 set -e
 
-VMID="${VMID:-110}"
+VMID="${VMID:-100}"
 KIOSK_USER="${KIOSK_USER:-kiosk}"
 VM_TITLE="${VM_TITLE:-Workstation}"
 PROXMOX_NODE="${PROXMOX_NODE:-$(hostname)}"

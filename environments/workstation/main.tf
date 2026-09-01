@@ -169,11 +169,13 @@ resource "proxmox_virtual_environment_vm" "workstation" {
   }
 
   lifecycle {
-    # cpu добавляется в ignore_changes для VM с hide_hypervisor = true —
-    # null_resource.cpu_hidden ниже пишет "-cpu host,hidden=1" по SSH в
-    # обход провайдера; без ignore_changes каждый terraform apply откатывал
-    # бы это обратно на голый "host" (тот же класс проблемы, что и usb).
-    ignore_changes = each.value.hide_hypervisor ? [usb, cpu] : [usb]
+    # cpu — статически в ignore_changes для ОБЕИХ VM, не только для той,
+    # что с hide_hypervisor = true: Terraform не поддерживает условный
+    # (per-instance) ignore_changes, список должен быть статическим для
+    # всех элементов for_each. Trade-off: cores для ubuntu-workstation
+    # тоже больше не меняется через terraform apply — только руками
+    # (qm set <id> -cores N), тем же путём, что и hidden=1 ниже.
+    ignore_changes = [usb, cpu]
   }
 }
 
