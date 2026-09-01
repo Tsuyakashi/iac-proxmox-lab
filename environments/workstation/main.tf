@@ -67,6 +67,17 @@
 # в старте. Работает независимо от того, как стартуют VM (qm start,
 # веб-UI, автостарт при ребуте хоста через on_boot) — не только через
 # terraform apply.
+#
+# hook_script_file_id как декларативный атрибут провайдера НЕ работает —
+# Proxmox отдаёт "only root can set 'hookscript' config" даже для
+# полноправного API-токена (тот же класс ограничения, что usbN/hostpciN
+# выше). Привязка идёт тем же null_resource + qm set по SSH (root@pam),
+# см. null_resource.hookscript_bind ниже. Сам файл-снипет заливается
+# декларативно (это разрешено — ограничение только на "приписать
+# hookscript к конкретной VM", не на загрузку файла в датастор), но после
+# любого re-apply, меняющего содержимое скрипта, право на исполнение
+# слетает и его нужно возвращать руками:
+#   ssh pve-rog chmod +x /var/lib/vz/snippets/workstation-exclusive-hook.sh
 resource "proxmox_virtual_environment_file" "workstation_exclusive_hook" {
   content_type = "snippets"
   datastore_id = "local"
@@ -85,8 +96,6 @@ resource "proxmox_virtual_environment_vm" "workstation" {
   node_name = coalesce(each.value.proxmox_node, var.proxmox_node)
   tags      = each.value.mutex_exclusive ? [each.value.tag_name, "ws-exclusive"] : [each.value.tag_name]
   on_boot   = each.value.on_boot
-
-  hook_script_file_id = each.value.mutex_exclusive ? proxmox_virtual_environment_file.workstation_exclusive_hook.id : null
 
   # Никакого clone{}/initialization{} — VM создаётся "с нуля", пустой
   # диск. Сеть/пользователя/пароль задаёшь в самом GUI-инсталляторе.
@@ -175,7 +184,13 @@ resource "proxmox_virtual_environment_vm" "workstation" {
     # всех элементов for_each. Trade-off: cores для ubuntu-workstation
     # тоже больше не меняется через terraform apply — только руками
     # (qm set <id> -cores N), тем же путём, что и hidden=1 ниже.
-    ignore_changes = [usb, cpu]
+    #
+    # hook_script_file_id — не задаётся в HCL вообще (см. комментарий
+    # выше про "only root can set"), но раз он физически стоит на VM
+    # через null_resource.hookscript_bind, provider увидит его при
+    # refresh и попытается снять той же запрещённой командой без этого
+    # ignore_changes.
+    ignore_changes = [usb, cpu, hook_script_file_id]
   }
 }
 
@@ -203,6 +218,30 @@ locals {
     for k, v in var.nodes : k => coalesce(v.proxmox_node, var.proxmox_node)
     if v.hide_hypervisor
   }
+
+  hookscript_bindings = {
+    for k, v in var.nodes : k => coalesce(v.proxmox_node, var.proxmox_node)
+    if v.mutex_exclusive
+  }
+}
+
+# hookscript тоже "only root can set" (см. комментарий у ресурса VM выше)
+# — тот же null_resource + SSH паттерн, что usbN/hostpciN. Файл-снипет
+# уже залит декларативно (proxmox_virtual_environment_file выше), тут
+# только приписываем его к конкретной VM.
+resource "null_resource" "hookscript_bind" {
+  for_each = local.hookscript_bindings
+
+  triggers = {
+    vm_id = proxmox_virtual_environment_vm.workstation[each.key].vm_id
+    file  = proxmox_virtual_environment_file.workstation_exclusive_hook.id
+  }
+
+  provisioner "local-exec" {
+    command = "ssh root@${each.value} qm set ${proxmox_virtual_environment_vm.workstation[each.key].vm_id} -hookscript ${proxmox_virtual_environment_file.workstation_exclusive_hook.id}"
+  }
+
+  depends_on = [proxmox_virtual_environment_vm.workstation]
 }
 
 # Реальные USB-устройства (host=vendorid:productid) можно задать только
