@@ -59,6 +59,15 @@ variable "nodes" {
                 вообще ("Нам не удалось найти драйверы"). Установка
                 стороннего virtio-драйвера с отдельного ISO — тоже
                 вариант, но sata0 проще и не требует второго cdrom.
+    mutex_exclusive — если true, добавляет тег "ws-exclusive" и
+                привязывает hook_script_file_id
+                (scripts/workstation-exclusive-hook.sh) — запуск этой VM
+                блокируется на уровне Proxmox, пока хоть одна другая VM с
+                тем же тегом на этой ноде running. Это НЕ про GPU/CPU —
+                про общие usb_devices, которые физически не могут слушать
+                двух гостей одновременно. Работает для любого способа
+                старта (qm start, веб-UI, on_boot после ребута хоста), не
+                только через terraform apply.
     vga_type   — "qxl2" — SPICE, 2 виртуальные головы, программный рендер
                 (см. корневой README/troubleshooting — virtio-gl оказался
                 single-head в этой сборке QEMU). Для Windows тоже qxl2 —
@@ -88,6 +97,7 @@ variable "nodes" {
     disk_size         = optional(number, 64)
     os_type           = optional(string, "l26")
     disk_interface    = optional(string, "scsi0")
+    mutex_exclusive   = optional(bool, false)
     vga_type          = optional(string, "qxl2")
     vga_memory        = optional(number, 64)
     iso_file_id       = optional(string, null)
@@ -105,28 +115,30 @@ variable "nodes" {
     #     забутиться через scsi1 passthrough), теперь установка идёт
     #     через iso_file_id ниже, флешка вообще не используется.
     "ubuntu-workstation" = {
-      tag_name      = "workstation",
-      memory        = 8192,
-      cores         = 4,
-      vga_type      = "qxl2",
-      mac           = "BC:24:11:9A:2C:71",
-      iso_file_id   = "local:iso/ubuntu-26.04-desktop-amd64.iso",
-      boot_from_iso = false,
-      on_boot       = false,
-      usb_devices   = ["13d3:5188", "0c45:5004", "08bb:2902", "046d:0825"]
+      tag_name        = "workstation",
+      memory          = 8192,
+      cores           = 4,
+      vga_type        = "qxl2",
+      mac             = "BC:24:11:9A:2C:71",
+      iso_file_id     = "local:iso/ubuntu-26.04-desktop-amd64.iso",
+      boot_from_iso   = false,
+      on_boot         = false,
+      mutex_exclusive = true,
+      usb_devices     = ["13d3:5188", "0c45:5004", "08bb:2902", "046d:0825"]
     }
     "windows-workstation" = {
-      tag_name       = "workstation-win",
-      memory         = 8192,
-      cores          = 4,
-      os_type        = "win10",
-      disk_interface = "sata0",
-      vga_type       = "qxl2",
-      mac            = "BC:24:11:7F:3D:19",
-      iso_file_id    = "local:iso/Win10_22H2_Russian_x64v1.iso",
-      boot_from_iso  = true,
-      on_boot        = true,
-      usb_devices    = ["13d3:5188", "0c45:5004", "08bb:2902", "046d:0825"]
+      tag_name        = "workstation-win",
+      memory          = 8192,
+      cores           = 4,
+      os_type         = "win10",
+      disk_interface  = "sata0",
+      vga_type        = "qxl2",
+      mac             = "BC:24:11:7F:3D:19",
+      iso_file_id     = "local:iso/Win10_22H2_Russian_x64v1.iso",
+      boot_from_iso   = false,
+      on_boot         = true,
+      mutex_exclusive = true,
+      usb_devices     = ["13d3:5188", "0c45:5004", "08bb:2902", "046d:0825"]
     }
   }
 }

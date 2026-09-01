@@ -54,13 +54,36 @@
 # поэтому Windows-запись сидит на нём, Ubuntu остаётся на scsi0 (раз уже
 # так стояло и работало).
 
+# mutex_exclusive: обе VM (ubuntu/windows) сидят на одних и тех же
+# usb_devices/vga — запускать их одновременно бессмысленно и физически
+# конфликтно (usb-устройство не может слушать оба гостя разом). Вместо
+# честного слова "не включай вторую, пока не выключил первую" — жёсткая
+# блокировка на уровне самого Proxmox через hookscript (см.
+# scripts/workstation-exclusive-hook.sh): pre-start смотрит другие VM с
+# тегом "ws-exclusive" на этой ноде, если хоть одна running — отказывает
+# в старте. Работает независимо от того, как стартуют VM (qm start,
+# веб-UI, автостарт при ребуте хоста через on_boot) — не только через
+# terraform apply.
+resource "proxmox_virtual_environment_file" "workstation_exclusive_hook" {
+  content_type = "snippets"
+  datastore_id = "local"
+  node_name    = var.proxmox_node
+
+  source_raw {
+    data      = file("${path.module}/../../scripts/workstation-exclusive-hook.sh")
+    file_name = "workstation-exclusive-hook.sh"
+  }
+}
+
 resource "proxmox_virtual_environment_vm" "workstation" {
   for_each = var.nodes
 
   name      = each.key
   node_name = coalesce(each.value.proxmox_node, var.proxmox_node)
-  tags      = [each.value.tag_name]
+  tags      = each.value.mutex_exclusive ? [each.value.tag_name, "ws-exclusive"] : [each.value.tag_name]
   on_boot   = each.value.on_boot
+
+  hook_script_file_id = each.value.mutex_exclusive ? proxmox_virtual_environment_file.workstation_exclusive_hook.id : null
 
   # Никакого clone{}/initialization{} — VM создаётся "с нуля", пустой
   # диск. Сеть/пользователя/пароль задаёшь в самом GUI-инсталляторе.
