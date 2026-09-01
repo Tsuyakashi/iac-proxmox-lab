@@ -15,9 +15,10 @@
 # датасторе + виртуальный cdrom — надёжный путь, тот же, что
 # рассматривался изначально.
 #
-# virtio-gl вместо GPU passthrough — см. обсуждение в чате (Kepler reset
+# qxl2 вместо GPU passthrough — см. обсуждение в чате (Kepler reset
 # bug без софтового фикса + драйвер 470.xxx официально EOL под свежие
-# ядра). Юзкейс — браузер/офис/редкие казуальные 2D-игры.
+# ядра; virtio-gl пробовали первым, но он single-head в этой сборке
+# QEMU — см. README). Юзкейс — браузер/офис/редкие казуальные 2D-игры.
 #
 # USB-периферия (клавиатура/мышь/веб-камера) — это отдельная история от
 # GPU passthrough и его reset bug'ом никак не связана: обычный host-USB
@@ -36,10 +37,15 @@
 # modules, on purpose" из корневого README) — desktop VM(и) не зависят от
 # lifecycle нод/раннера, и наоборот.
 #
-# nodes — карта, не одиночный ресурс: вторая запись под Windows-десктоп
-# (та же схема — свой ISO, virtio-gl, свои usb_devices) добавится сюда же
-# позже. Обе VM смогут жить параллельно на одном физическом GPU — virtio
-# не эксклюзивен в отличие от passthrough.
+# nodes — карта, не одиночный ресурс: ubuntu-workstation + windows-workstation
+# живут на одном физическом хосте параллельно — паравиртуальное видео
+# (qxl2) не эксклюзивно, в отличие от GPU passthrough, так что обе VM
+# заведены декларативно всегда, включена в моменте только одна (see
+# on_boot ниже + вручную qm start/stop той, что нужна).
+#
+# on_boot решает, какая из двух поднимется сама при перезагрузке/старте
+# самой ноды pve-rog — контролируется полем on_boot в var.nodes, Terraform
+# не проверяет, что true выставлено ровно у одной записи (см. variables.tf).
 
 resource "proxmox_virtual_environment_vm" "workstation" {
   for_each = var.nodes
@@ -47,6 +53,7 @@ resource "proxmox_virtual_environment_vm" "workstation" {
   name      = each.key
   node_name = coalesce(each.value.proxmox_node, var.proxmox_node)
   tags      = [each.value.tag_name]
+  on_boot   = each.value.on_boot
 
   # Никакого clone{}/initialization{} — VM создаётся "с нуля", пустой
   # диск. Сеть/пользователя/пароль задаёшь в самом GUI-инсталляторе.
@@ -121,7 +128,7 @@ resource "proxmox_virtual_environment_vm" "workstation" {
   }
 
   operating_system {
-    type = "l26"
+    type = each.value.os_type
   }
 
   lifecycle {
