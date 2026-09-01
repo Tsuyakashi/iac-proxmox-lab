@@ -113,6 +113,11 @@ variable "nodes" {
                 перезатирает cpu-строку на голый "host" при каждом apply,
                 но и cores для этой записи после первого apply меняется
                 только руками (qm set), не через terraform apply.
+    network_model — "virtio" (дефолт) для Linux — драйвер в ядре из
+                коробки. Для Windows нужен "e1000" — у virtio-net нет
+                встроенного драйвера, без него сетевой контроллер висит
+                неопознанным в "Другие устройства" и ipconfig пустой
+                (та же история, что disk_interface/scsi0 у диска).
     usb_devices — список host-USB устройств для passthrough в формате
                 "vendorid:productid" (смотреть через `ssh pve-rog
                 lsusb`), например ["046d:c52b", "046d:0843"] под
@@ -140,6 +145,7 @@ variable "nodes" {
     spice_audio       = optional(bool, true)
     gpu_pci_id        = optional(string, null)
     hide_hypervisor   = optional(bool, false)
+    network_model     = optional(string, "virtio")
     iso_file_id       = optional(string, null)
     boot_from_iso     = optional(bool, true)
     on_boot           = optional(bool, false)
@@ -167,13 +173,14 @@ variable "nodes" {
       usb_devices     = ["13d3:5188", "0c45:5004", "08bb:2902", "046d:0825"]
     }
     "windows-workstation" = {
-      tag_name        = "workstation-win",
-      memory          = 8192,
-      cores           = 4,
-      os_type         = "win10",
-      disk_interface  = "sata0",
-      vga_type        = "std",
-      spice_audio     = false,
+      tag_name       = "workstation-win",
+      memory         = 8192,
+      cores          = 4,
+      os_type        = "win10",
+      disk_interface = "sata0",
+      network_model  = "e1000",
+      vga_type       = "std",
+      spice_audio    = false,
       # TODO: подставить реальный bus:slot после `ssh pve-rog lspci -nn |
       # grep -iE "nvidia|vga|audio"` — плейсхолдер ниже почти наверняка
       # неверный для конкретно твоего железа.

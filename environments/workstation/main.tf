@@ -136,9 +136,15 @@ resource "proxmox_virtual_environment_vm" "workstation" {
     : [each.value.disk_interface, "ide3"]
   )
 
+  # model — дефолт провайдера (virtio) у Windows не видит встроенного
+  # драйвера, ровно та же история, что была с disk_interface/scsi0
+  # ("Ethernet-контроллер" неопознан в диспетчере устройств, ipconfig
+  # пустой). e1000 — эмулированный Intel-контроллер, у Windows есть
+  # нативная поддержка из коробки, как и sata0 для диска.
   network_device {
     bridge      = var.network_bridge
     mac_address = each.value.mac
+    model       = each.value.network_model
   }
 
   # guest agent появится только после того, как руками поставишь
