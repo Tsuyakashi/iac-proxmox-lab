@@ -181,11 +181,13 @@ variable "nodes" {
       network_model  = "e1000",
       vga_type       = "std",
       spice_audio    = false,
-      # TODO: подставить реальный bus:slot после `ssh pve-rog lspci -nn |
-      # grep -iE "nvidia|vga|audio"` — плейсхолдер ниже почти наверняка
-      # неверный для конкретно твоего железа.
-      gpu_pci_id      = "01:00",
-      hide_hypervisor = true,
+      # GPU passthrough отключён — Kepler reset bug + отсутствие ACPI
+      # _DSM метода (bbswitch: "No suitable _DSM call found") делают его
+      # непригодным на этом железе, см. историю в чате. gpu_pci_id/
+      # hide_hypervisor остаются в схеме на случай будущего железа,
+      # которое реально поддерживает нормальный reset.
+      gpu_pci_id      = null,
+      hide_hypervisor = false,
       mac             = "BC:24:11:7F:3D:19",
       iso_file_id     = "local:iso/Win10_22H2_Russian_x64v1.iso",
       boot_from_iso   = true,
