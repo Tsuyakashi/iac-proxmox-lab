@@ -172,8 +172,7 @@ each for a concrete reason:
   `proxmox_hardware_mapping_pci`, `x-vga` output straight to the monitors —
   the opposite of the paravirtual `qxl2`/kiosk approach here. The
   SPICE/`qxl2`/`virtio-gl` troubleshooting notes stay in
-  [troubleshooting.md](troubleshooting.md) as reference. The now-orphaned
+  [troubleshooting.md](troubleshooting.md) as reference. The `pve-rog`
+  desktop VMs it once managed (100/110) were destroyed beforehand, so the
   `workstation/terraform.tfstate` key in MinIO was already empty
-  (`terraform destroy` was a no-op); the two `pve-rog` desktop VMs it once
-  managed (100/110) are left in place, to be `qm destroy`'d by hand when no
-  longer wanted.
+  (`terraform destroy` was a no-op).
