@@ -28,12 +28,13 @@ comfortably ahead of current usage) — it's also where the NFS
 shared-storage export lives (`scripts/shared-storage-creation.sh`), for
 exactly that reason.
 
-`pve-rog` also hosts `workstation` — a GUI-installed Ubuntu Desktop VM used
-as an actual personal computer (external monitors/keyboard/mouse/webcam
-plugged into the physical laptop, passed through to the VM), with the host
-itself running as a local SPICE kiosk so no other machine is needed to view
-it. See [Other environments](#other-environments) below and
-[`../environments/workstation/README.md`](../environments/workstation/README.md).
+`pve-rog` used to host `workstation` — a GUI-installed Ubuntu Desktop VM
+driven from a local SPICE kiosk. That environment was removed from this
+repo; GPU-passthrough desktop VMs now live in the dedicated
+[`proxmox-hosted-workstation`](../../proxmox-hosted-workstation) repo
+(`bare-pve` + GTX 950, whole-device passthrough via
+`proxmox_hardware_mapping_pci`). The USB/hookscript/`qxl2` mechanics it
+exercised are kept in [troubleshooting.md](troubleshooting.md) as reference.
 
 The Zenbook runs `corosync-qnetd` and nothing else — no VMs, just a quorum
 vote so the two real nodes survive either one going down without a
@@ -77,9 +78,9 @@ Consequences of the split:
 
 ## Other environments
 
-Four more root modules live under `environments/`, all built on the same
-`modules/proxmox-vm` as `nodes/` (except `workstation/`, see below), none
-wired into `pipeline.yml` — all applied manually, on demand:
+Three more root modules live under `environments/`, all built on the same
+`modules/proxmox-vm` as `nodes/`, none wired into `pipeline.yml` — all
+applied manually, on demand:
 
 - **`poly-nodes/`** — infra for a separate project,
   [`poly-ci`](https://github.com/tsuyakashi/poly-ci): runner/prod/monitoring
@@ -124,35 +125,19 @@ wired into `pipeline.yml` — all applied manually, on demand:
     `null_resource` + `local-exec` workaround. See
     [The raw-disk-passthrough pattern](#the-raw-disk-passthrough-pattern-null_resource--local-exec)
     below for why this exists and its limits.
-- **`workstation/`** — a GUI-installed Ubuntu Desktop VM(s) on `pve-rog`,
-  used as an actual personal computer rather than a headless service.
-  Structurally different from every other environment: **not** built on
-  `modules/proxmox-vm` at all — that module is built entirely around
-  `clone{}` from the golden image plus cloud-init user-data, which doesn't
-  fit "install Ubuntu Desktop by hand through the GUI installer". Instead
-  it's a standalone `proxmox_virtual_environment_vm` resource that
-  Terraform only uses to wire up the VM's hardware (disk, network, vga,
-  virtual cdrom with an ISO, USB peripherals, audio) — the OS install
-  itself happens by hand, through the SPICE console, like on real
-  hardware. GPU passthrough was deliberately rejected (Kepler VFIO reset
-  bug with no software fix, plus the 470.xxx driver branch being
-  officially EOL) in favor of paravirtualized video (`vga_type = "qxl2"`,
-  chosen specifically for its two-head SPICE support — `virtio-gl` was
-  tried first and rejected for being single-head-only in Proxmox's QEMU
-  build). Real USB peripherals (keyboard/mouse/webcam) hit the same
-  "only root can set real-device config" API restriction as the raw-disk
-  pattern above, so they're bound the same way (`null_resource` +
-  `local-exec` running `qm set -scsiN`/`-usbN` over SSH). The host itself
-  runs as a local SPICE kiosk (`scripts/desktop-kiosk-setup.sh`) so the VM
-  displays directly on the laptop's own external monitors, with no other
-  machine needed to view it. Full detail — the ISO-vs-raw-flash-drive boot
-  story, the `qxl2` vs `virtio-gl` vs passthrough decision, the kiosk
-  script's `pvesh`/sudoers/DPMS mechanics — is in its own
-  [`environments/workstation/README.md`](../environments/workstation/README.md)
-  rather than duplicated here. This is also the environment the
-  nested-→-bare-metal migration diagram in [history.md](history.md) maps
-  onto (the Ubuntu-Desktop half of it; a second, Windows-desktop entry in
-  the same `var.nodes` map is the planned next step).
+
+> **Removed: `workstation/`.** A GUI-installed Ubuntu Desktop VM on
+> `pve-rog` (standalone `proxmox_virtual_environment_vm`, no
+> `modules/proxmox-vm`; `vga_type = "qxl2"` + a local SPICE kiosk on the
+> host; USB peripherals and the mutex hookscript bound via the same
+> `null_resource` + SSH pattern as the raw disk below). GPU passthrough was
+> rejected there — Kepler VFIO reset bug, 470.xxx EOL. That whole area moved
+> to the dedicated [`proxmox-hosted-workstation`](../../proxmox-hosted-workstation)
+> repo, which does the opposite: `bare-pve` + a desktop-class GTX 950,
+> whole-device passthrough (GPU + all USB controllers + onboard audio) via
+> `proxmox_hardware_mapping_pci`, `x-vga` primary output straight to the
+> monitors. The SPICE/`qxl2`/kiosk troubleshooting notes stay in
+> [troubleshooting.md](troubleshooting.md).
 
 ## The raw-disk-passthrough pattern (`null_resource` + `local-exec`)
 
@@ -161,10 +146,10 @@ here rather than only in that environment's own README, since it's a
 pattern any future environment needing the same thing (an existing
 physical disk, not a Terraform-managed datastore volume) would reuse. The
 same underlying restriction — the Proxmox API rejecting non-root access to
-"real device" config — also applies to USB passthrough (`usbN`, used by
-`environments/workstation` for its keyboard/mouse/webcam), and is worked
-around with the identical `null_resource` + SSH pattern; see that
-environment's own README for the USB-specific version.
+"real device" config — also applies to USB (`usbN`), hostpci (`hostpciN`)
+and `hookscript` config, all worked around with the identical
+`null_resource` + SSH pattern (the now-removed `workstation/` env used it
+for keyboard/mouse/webcam and its mutex hookscript).
 
 `bpg/proxmox` only supports datastore-backed disks declaratively (the
 `disk { ... }` block). Binding an already-existing physical block device
@@ -205,10 +190,10 @@ resource "null_resource" "recovery_ro_bind" {
 - Proxmox passes through the whole device, not the specific partition
   requested — `/dev/sdb1` on the host shows up as raw `/dev/sdb` inside the
   guest.
-- The USB variant (`environments/workstation`) adds one more wrinkle:
-  `usb_devices` is a positional `list(string)`, not keyed by device — see
-  that environment's own README for what happens to `null_resource`
-  indices when the list is edited in the middle.
+- The USB variant, as the removed `workstation/` env used it, had one more
+  wrinkle: `usb_devices` was a positional `list(string)`, not keyed by
+  device, so editing the list in the middle shifted every later
+  `null_resource` index and forced their recreation.
 
 ## State backend lives off both
 
@@ -293,9 +278,8 @@ ones) instead, and guest-agent-specific access has its own new
 for exactly what was dropped.
 
 Note that `qm set -scsiN <device>,ro=1` (used by `immich-node`'s raw-disk
-passthrough — see [above](#the-raw-disk-passthrough-pattern-null_resource--local-exec))
-and `qm set -usbN host=<vendorid:productid>` (used by `workstation`'s
-keyboard/mouse/webcam passthrough) both run as `root` over plain SSH, not
-through the Terraform provider's API token — so neither is bound by
-`TerraformProv`'s privilege list at all, and neither needs any addition to
-the table above.
+passthrough — see [above](#the-raw-disk-passthrough-pattern-null_resource--local-exec)),
+and `qm set -usbN`/`-hostpciN`/`-hookscript` more generally, all run as
+`root` over plain SSH, not through the Terraform provider's API token — so
+none is bound by `TerraformProv`'s privilege list, and none needs any
+addition to the table above.

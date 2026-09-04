@@ -6,7 +6,7 @@
 # ci-runner AppRole pipeline.yml authenticates with; this one sets up a
 # userpass login for humans running scripts/vault-apply-wrapper.sh against
 # the manually-applied environments (runner, poly-nodes, minecraft-node,
-# immich-node, workstation).
+# immich-node).
 #
 # Deliberately a SEPARATE auth method and policy from ci-runner's AppRole,
 # not a shared one:
@@ -31,7 +31,7 @@
 # operators later without re-running the whole script.
 #
 # Token TTL is longer than ci-runner's (15m/1h) on purpose — a manual
-# apply plus troubleshooting on immich-node/workstation can run well past
+# apply plus troubleshooting on immich-node can run well past
 # an hour; re-authenticating mid-troubleshooting is just friction, not a
 # meaningful security win for a LAN-only lab Vault.
 #
