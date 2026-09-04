@@ -1,5 +1,0 @@
-# proxmox_endpoint  — теперь выводится из proxmox_node (см. locals.tf), не переменная.
-# proxmox_api_token — приходит через TF_VAR_proxmox_api_token из scripts/vault-apply-wrapper.sh.
-#
-# ISO уже должен лежать в датасторе на pve-rog — см. раздел "Установка" в
-# README, Terraform его не качает и не заливает сам.

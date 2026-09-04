@@ -299,8 +299,8 @@ rewrites the config but doesn't force this. Worth checking `cpu.type` on
 any future VM whose workload turns out to depend on specific CPU features
 (AES-NI, AVX, etc.) — the default here has always been the conservative
 one, and it's opt-in per environment, not automatic.
-`environments/workstation` hit the same non-hot-pluggable behavior for a
-different field (`vga` type, not `cpu.type`) — see
+The since-removed `environments/workstation` hit the same non-hot-pluggable
+behavior for a different field (`vga` type, not `cpu.type`) — see
 [the `virtio-gl`/`qxl2` entry](#virtio-gl-single-head) below.
 
 <a id="no-serial-console"></a>
@@ -623,23 +623,35 @@ local-only), not a warning that something is already broken.
 ## Proxmox's API rejects any non-root request to set real-device config on `usbN`/`scsiN`, including a fully-privileged API token — surfaces as `only root can set 'usbN' config for real devices`
 
 Hit first for `immich-node`'s raw exFAT-disk passthrough (`scsiN`), and
-again for `environments/workstation`'s keyboard/mouse/webcam (`usbN`) —
-same root cause both times: this class of config bypasses Proxmox's own
-privilege model entirely and requires `root@pam`, no matter what the API
-token's ACL grants. There's no fix on the Terraform-provider side; the
-working pattern in both environments is a `null_resource` + `local-exec`
-running `qm set` directly over SSH as root, with `lifecycle {
-ignore_changes = [usb] }` (or the disk-equivalent) on the VM resource
-itself — otherwise the provider's own `refresh`/`plan` sees the
-out-of-band device as drift and tries to "fix" it through the API token,
-hitting the exact same error. See
-[architecture.md#raw-disk-passthrough-pattern](architecture.md#raw-disk-passthrough-pattern)
-and [`../environments/workstation/README.md`](../environments/workstation/README.md)
-for the USB-specific version, including the positional-list
-index-shifting caveat that comes with it.
+again for the since-removed `environments/workstation`'s keyboard/mouse/
+webcam (`usbN`), hookscript, and `hostpciN` — same root cause every time:
+this class of config bypasses Proxmox's own privilege model entirely and
+requires `root@pam`, no matter what the API token's ACL grants. There's no
+fix on the Terraform-provider side; the working pattern is a
+`null_resource` + `local-exec` running `qm set` directly over SSH as root,
+with `lifecycle { ignore_changes = [usb] }` (or the disk-/hostpci-/
+hookscript-equivalent) on the VM resource itself — otherwise the provider's
+own `refresh`/`plan` sees the out-of-band device as drift and tries to
+"fix" it through the API token, hitting the exact same error. See
+[architecture.md#raw-disk-passthrough-pattern](architecture.md#raw-disk-passthrough-pattern).
+
+> The `usbN` variant, as `environments/workstation` used it, had a
+> positional-list caveat: `usb_devices` was a `list(string)`, so editing
+> the middle of the list shifted every later `null_resource` index. The
+> newer [`proxmox-hosted-workstation`](../../proxmox-hosted-workstation)
+> repo sidesteps all of this by passing whole USB *controllers* through
+> `proxmox_hardware_mapping_pci` (a first-class provider resource) instead
+> of individual devices via SSH.
 
 <a id="virtio-gl-single-head"></a>
 ## `virtio-gl` is single-head only in Proxmox's QEMU build — multi-monitor needs `qxl2` instead, at the cost of GPU acceleration
+
+> The `environments/workstation` env these next few entries refer to was
+> removed from this repo (see [history.md](history.md)); the paravirtual-
+> video / SPICE-kiosk approach did not carry over to the dedicated
+> [`proxmox-hosted-workstation`](../../proxmox-hosted-workstation) repo,
+> which uses real GPU passthrough with `x-vga` output instead. The notes
+> are kept here as reference for anyone going the SPICE route.
 
 Tried `vga_type = "virtio-gl"` first for `environments/workstation`
 (GPU-accelerated 2D/desktop compositing via Venus/virgl through the
@@ -668,7 +680,7 @@ heads in response to what the SPICE client reports about the client's own
 display layout, not proactively. Fixed by using `remote-viewer
 --full-screen=all` instead, which reports every physical monitor on the
 client (here, the two external monitors plugged into the same host
-running the viewer — see `scripts/desktop-kiosk-setup.sh`) and gets both
+running the viewer, in the now-removed kiosk setup) and gets both
 QXL heads activated in the guest as a result.
 
 ## SPICE draws no mouse cursor at all when the mouse is passed through to the guest as a raw USB device instead of going through the SPICE input channel — looks like a rendering bug, isn't one

@@ -29,17 +29,16 @@ one node at a time:
   terms, the rest of `pve-rog`'s guests: `prod`/`stage`/`dev` nodes,
   `poly-nodes`, etc.).
 
-This repo has already completed the Ubuntu half of that "after" state —
-that's exactly what
-[`environments/workstation`](../environments/workstation/README.md) is: a
-GUI-installed Ubuntu Desktop VM on bare-metal `pve-rog`, no nesting, no
-dual-boot, viewed through a local SPICE kiosk instead of a physical
-monitor plugged into the laptop directly. The Windows 10 half is the
-planned next step — `environments/workstation/variables.tf`'s `nodes` map
-is deliberately a map, not a single resource, specifically so a second
-entry (Windows 10, its own ISO, the same `qxl2` scheme, its own
-`usb_devices`) can be added alongside `ubuntu-workstation` later, letting
-both VMs share the one physical GPU host the way the diagram implies.
+This repo reached that "after" state via `environments/workstation` — a
+GUI-installed Ubuntu Desktop VM on bare-metal `pve-rog`, viewed through a
+local SPICE kiosk (`vga_type = "qxl2"`, GPU passthrough deliberately
+rejected for that Kepler card). That environment was later **removed from
+this repo** (see the log entry below): the desktop-VM work — including the
+Windows 10 half that was the planned next step — moved to a dedicated repo,
+[`proxmox-hosted-workstation`](../../proxmox-hosted-workstation), which
+takes the opposite approach on different hardware (`bare-pve` + a
+desktop-class GTX 950, real whole-device GPU + USB-controller passthrough
+via `proxmox_hardware_mapping_pci`, output straight to physical monitors).
 
 <a id="pve-rog-bare-metal-rename"></a>
 ## `pve-rog`: nested Proxmox → bare metal, and the cluster rename
@@ -104,8 +103,8 @@ each for a concrete reason:
   key-namespacing later made it straightforward to migrate
   `environments/runner/`'s state into the same bucket too — see
   [troubleshooting.md](troubleshooting.md#runner-local-backend-spof)
-  — and to add `poly-nodes/`, `minecraft-node/`, `immich-node/`, and
-  `workstation/` under their own keys later.
+  — and to add `poly-nodes/`, `minecraft-node/` and `immich-node/` under
+  their own keys later.
 - Moving the VM/cloud-init resources into `modules/proxmox-vm` also meant
   they picked up new state addresses (`module.node["..."]....` instead of
   the old flat `proxmox_virtual_environment_vm.node["..."]`). Adopting
@@ -159,10 +158,22 @@ each for a concrete reason:
   and the `cpu_type` module input.
 - `environments/workstation` added — a GUI-installed Ubuntu Desktop VM on
   `pve-rog`, own root module, own state key, deliberately not built on
-  `modules/proxmox-vm` (see
-  [architecture.md#other-environments](architecture.md#other-environments)).
-  This is the environment that closes out the migration diagram at the
-  top of this page.
+  `modules/proxmox-vm`. `vga_type = "qxl2"` + a local SPICE kiosk on the
+  host; GPU passthrough rejected (Kepler VFIO reset bug, 470.xxx EOL).
 - `pve-rog` rebuilt from a nested Proxmox instance onto bare metal,
   matching `bare-pve`, and the cluster/node rename — see
   [above](#pve-rog-bare-metal-rename).
+- `environments/workstation` **removed**, along with
+  `scripts/gpu-passthrough-setup.sh`, `scripts/desktop-kiosk-setup.sh` and
+  `scripts/workstation-exclusive-hook.sh`. Desktop-VM work moved to a
+  dedicated repo, [`proxmox-hosted-workstation`](../../proxmox-hosted-workstation):
+  `bare-pve` + a desktop-class GTX 950, real whole-device passthrough
+  (GPU + all USB controllers + onboard audio) via
+  `proxmox_hardware_mapping_pci`, `x-vga` output straight to the monitors —
+  the opposite of the paravirtual `qxl2`/kiosk approach here. The
+  SPICE/`qxl2`/`virtio-gl` troubleshooting notes stay in
+  [troubleshooting.md](troubleshooting.md) as reference. The now-orphaned
+  `workstation/terraform.tfstate` key in MinIO was already empty
+  (`terraform destroy` was a no-op); the two `pve-rog` desktop VMs it once
+  managed (100/110) are left in place, to be `qm destroy`'d by hand when no
+  longer wanted.

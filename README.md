@@ -29,9 +29,7 @@ here (nested → bare metal, the flat-layout → modules refactor), see
 │       ├ VM 9001 golden image   │       │       ├ VM 9000 golden image (own)    │
 │       ├ prod/stage/dev nodes   │       │       ├ CT 200: minio (state backend) │
 │       ├ poly-nodes             │       │       ├ CT 300: vault (secrets)       │
-│       ├ VM 100: workstation    │       │       └ VM: ci-runner                 │
-│       │ (GUI-installed desktop)│       │                                       │
-│       └ VM 101: immich-node    │       │                                       │
+│       └ VM 101: immich-node    │       │       └ VM: ci-runner                 │
 │         (see note below)       │       │                                       │
 └──────────────┬─────────────────┘       └──────────────┬────────────────────────┘
                │                                        │
@@ -62,9 +60,8 @@ commands, and the web UI are all driven from there.
 **Two nodes, one cluster (`nexus-cluster`), plus a QDevice arbiter — both
 nodes bare metal.** `bare-pve` (`.30`) holds storage and anything that must
 not go down (MinIO, Vault, CI runner); `pve-rog` (`.20`) keeps the "extra
-CPU/RAM for peak load" role, hosts `workstation` — a GUI-installed desktop
-VM used as an actual personal computer — and, in practice, `immich-node`
-too (see the note above). The full story of how both nodes ended up bare
+CPU/RAM for peak load" role and, in practice, hosts `immich-node`
+(see the note above). The full story of how both nodes ended up bare
 metal (one of them was nested Proxmox on a laptop for a while) is in
 [docs/history.md](docs/history.md); the full reasoning behind the cluster
 topology, the QDevice/Tailscale setup, the physical LAN quirks, and the
@@ -79,9 +76,7 @@ state-backend placement is in
   provider (chosen over `Telmate/proxmox` — more actively maintained, fuller
   API coverage)
 - **cloud-init** — VM bootstrapping (user creation, SSH keys, package install)
-  for every environment except `workstation/`, which is installed by hand
-  through the GUI installer instead (see
-  [environments/workstation/README.md](environments/workstation/README.md))
+  for every environment
 - **Ubuntu 24.04 (Noble) cloud image** — golden template, cloned per VM.
   Each cluster node keeps its own local copy (VM 9000 on `bare-pve`, VM
   9001 on `pve-rog`) — see [Node placement](#node-placement-endpoint--golden-image-resolution)
@@ -109,8 +104,15 @@ state-backend placement is in
 - **Docker Compose + systemd** — `immich-node`'s provisioning model,
   deliberately not swarm (see
   [environments/immich-node/README.md](environments/immich-node/README.md))
-- **SPICE (`qxl2`) + a local kiosk session** — `workstation/`'s display
-  model (see [environments/workstation/README.md](environments/workstation/README.md))
+
+> **GPU-passthrough desktop VMs moved out of this repo.** A dedicated
+> workstation (Windows/Linux guest with full GPU + USB-controller
+> passthrough on `bare-pve`, `bpg/proxmox` + `proxmox_hardware_mapping_pci`)
+> now lives in [`proxmox-hosted-workstation`](../proxmox-hosted-workstation).
+> The old `environments/workstation` here (paravirtual `qxl2` + SPICE kiosk
+> on `pve-rog`, GPU passthrough deliberately rejected for that Kepler card)
+> was removed — the passthrough-specific troubleshooting notes are kept in
+> [docs/troubleshooting.md](docs/troubleshooting.md) as reference.
 
 ## Node placement: endpoint + golden-image resolution
 
@@ -172,9 +174,7 @@ login.
 
 Standard `modules/` + `environments/` split. `modules/proxmox-vm` is the one
 reusable building block — a single cloned VM with a cloud-init snippet — and
-every root module except `environments/workstation` calls it (see
-[docs/architecture.md#other-environments](docs/architecture.md#other-environments)
-for why `workstation` is the exception).
+every root module calls it.
 
 ```
 modules/
@@ -193,10 +193,8 @@ environments/
 ├── runner/                           # ROOT MODULE — CI runner, own state/lifecycle
 ├── poly-nodes/                       # ROOT MODULE — infra for poly-ci, manual apply
 ├── minecraft-node/                   # ROOT MODULE — isolated Minecraft node, manual apply
-├── immich-node/                      # ROOT MODULE — Immich (docker compose), manual apply
-│   └── README.md                     #   cpu_type / recovery-ro details specific to this env
-└── workstation/                      # ROOT MODULE — GUI-installed desktop VM(s), manual apply
-    └── README.md                     #   qxl2 vs virtio-gl vs GPU passthrough, kiosk mechanics
+└── immich-node/                      # ROOT MODULE — Immich (docker compose), manual apply
+    └── README.md                     #   cpu_type / recovery-ro details specific to this env
 
 .github/workflows/pipeline.yml        # provision (terraform, environments/nodes) + deploy (ansible)
 scripts/
@@ -209,7 +207,6 @@ scripts/
 ├── vault-userpass-init.sh            # Vault: operator-manual-apply policy/login (laptop)
 ├── vault-apply-wrapper.sh            # Sourced shell wrapper: auto-fetches secrets for manual apply
 ├── shared-storage-creation.sh        # Proxmox-side (bare-pve): NFS export prep
-├── desktop-kiosk-setup.sh            # Proxmox-side (pve-rog): local SPICE kiosk for workstation
 └── register-github-runner.sh         # Registers the GitHub Actions runner agent on ci-runner
 ```
 
@@ -389,17 +386,15 @@ Always run this by hand, never from the self-hosted runner's own CI job —
 see [docs/architecture.md#two-independent-root-modules](docs/architecture.md#two-independent-root-modules)
 for the incident that made this a hard rule.
 
-### 9. (Optional, manual, as-needed) poly-nodes / minecraft-node / immich-node / workstation
+### 9. (Optional, manual, as-needed) poly-nodes / minecraft-node / immich-node
 
 Same pattern as steps 7/8 — `cd` into the environment, `terraform init`,
 `terraform apply` (with `vault-apply-wrapper.sh` sourced). `minecraft-node`
 is the one exception still needing a manual `terraform.tfvars` for
 `playit_secret_key` (see [Secrets](#secrets) above). None are wired into
-`pipeline.yml`. `immich-node` and `workstation` each need a manual pass
-after the first `apply` that Terraform can't reach (guest-OS config, GUI
-install) — see their own READMEs:
-[environments/immich-node/README.md](environments/immich-node/README.md),
-[environments/workstation/README.md](environments/workstation/README.md).
+`pipeline.yml`. `immich-node` needs a manual pass after the first `apply`
+that Terraform can't reach (guest-OS config) — see
+[environments/immich-node/README.md](environments/immich-node/README.md).
 
 ## CI/CD
 
@@ -474,8 +469,10 @@ nothing else references them.
       dedicated VM, actually running on `pve-rog` (docs/tfvars previously
       assumed `bare-pve` — corrected to match the deployed reality, see
       the architecture note above)
-- [x] `environments/workstation` added — GUI-installed Ubuntu Desktop VM
-      on `pve-rog`, local SPICE kiosk
+- [x] `environments/workstation` (GUI-installed Ubuntu Desktop on `pve-rog`,
+      `qxl2` + local SPICE kiosk) **removed** — GPU-passthrough desktop VMs
+      now live in the dedicated
+      [`proxmox-hosted-workstation`](../proxmox-hosted-workstation) repo
 - [x] Dedicated hardware acquired for `bare-pve`, and `pve-rog`
       subsequently rebuilt onto bare metal too — see
       [docs/history.md](docs/history.md)
@@ -503,7 +500,7 @@ nothing else references them.
       into Vault** (`proxmox/ssh-keys`) — `scripts/vault-apply-wrapper.sh`
       fetches both alongside the API token and MinIO credentials.
       Manual-apply environments (`runner`, `poly-nodes`, `minecraft-node`,
-      `immich-node`, `workstation`) no longer need a filled-in
+      `immich-node`) no longer need a filled-in
       `terraform.tfvars` at all, except `minecraft-node`'s
       `playit_secret_key` (not yet in Vault, tracked as a follow-up).
 - [x] `immich-node`'s recovery-disk bind is Terraform-managed; what remains
