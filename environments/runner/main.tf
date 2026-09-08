@@ -25,8 +25,7 @@ module "ci_runner" {
   # IP известен заранее (static), нет смысла ждать guest agent на apply
   wait_for_ip_disabled = true
 
-  vm_ssh_public_key = var.vm_ssh_public_key
-  ci_ssh_public_key = var.ci_ssh_public_key
+  ssh_public_key = var.ssh_public_key
 
   docker_group   = true
   extra_packages = []
@@ -55,7 +54,7 @@ module "ci_runner" {
     "systemctl enable --now docker",
     "curl -o /usr/local/bin/terraform http://192.168.100.100:9000/tools/terraform_1.15.8_linux_amd64",
     "chmod +x /usr/local/bin/terraform",
-    "curl -o /usr/local/bin/vault http://192.168.100.100:9000/tools/vault_1.19.0_linux_amd64",
+    "curl -o /usr/local/bin/vault http://192.168.100.100:9000/tools/vault_2.1.0_linux_amd64",
     "chmod +x /usr/local/bin/vault",
     "curl -o /usr/local/bin/mc https://dl.min.io/aistor/mc/release/linux-amd64/mc",
     "chmod +x /usr/local/bin/mc",

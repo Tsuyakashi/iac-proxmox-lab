@@ -95,13 +95,8 @@ variable "wait_for_ip_disabled" {
   default     = false
 }
 
-variable "vm_ssh_public_key" {
-  description = "SSH-ключ пользователя, инжектится через cloud-init."
-  type        = string
-}
-
-variable "ci_ssh_public_key" {
-  description = "SSH-ключ для CI/CD-доступа (без passphrase, отдельный от пользовательского)."
+variable "ssh_public_key" {
+  description = "SSH-ключ, инжектится через cloud-init. Единый ключ для пользователя и CI/CD (было два отдельных поля vm_ssh_public_key/ci_ssh_public_key)."
   type        = string
 }
 

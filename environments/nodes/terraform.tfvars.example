@@ -2,9 +2,9 @@
 #
 # proxmox_endpoint  — теперь выводится из proxmox_node (см. locals.tf), не переменная.
 # proxmox_api_token — приходит через TF_VAR_proxmox_api_token из scripts/vault-apply-wrapper.sh.
-# vm_ssh_public_key / ci_ssh_public_key — приходят из Vault тем же враппером
-#   (proxmox/ssh-keys), см. scripts/vault-apply-wrapper.sh и
+# ssh_public_key — приходит из Vault тем же враппером (proxmox/ssh-keys ->
+#   public_key), см. scripts/vault-apply-wrapper.sh и
 #   scripts/vault-userpass-init.sh.
 #
-# В CI (pipeline.yml) значения приходят иначе — из GitHub Secrets напрямую
-# в env:, этот файл там не используется вообще.
+# В CI (pipeline.yml) те же значения тянутся из Vault через ci-runner
+# AppRole и экспортируются в env:, этот файл там не используется вообще.

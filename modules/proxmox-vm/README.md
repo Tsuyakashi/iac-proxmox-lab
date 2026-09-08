@@ -27,8 +27,7 @@ module "node" {
   }
   wait_for_ip_disabled = true
 
-  vm_ssh_public_key = var.vm_ssh_public_key
-  ci_ssh_public_key = var.ci_ssh_public_key
+  ssh_public_key = var.ssh_public_key
 }
 ```
 
@@ -48,8 +47,7 @@ module "ci_runner" {
 
   ip_config = { mode = "dhcp" }
 
-  vm_ssh_public_key = var.vm_ssh_public_key
-  ci_ssh_public_key = var.ci_ssh_public_key
+  ssh_public_key = var.ssh_public_key
 }
 ```
 

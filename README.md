@@ -29,8 +29,8 @@ here (nested → bare metal, the flat-layout → modules refactor), see
 │       ├ VM 9001 golden image   │       │       ├ VM 9000 golden image (own)    │
 │       ├ prod/stage/dev nodes   │       │       ├ CT 200: minio (state backend) │
 │       ├ poly-nodes             │       │       ├ CT 300: vault (secrets)       │
-│       └ VM 101: immich-node    │       │       └ VM: ci-runner                 │
-│         (see note below)       │       │                                       │
+│       └ VM 101: immich-node    │       │       ├ CT 400: tailscale (jump-host) │
+│         (see note below)       │       │       └ VM: ci-runner                 │
 └──────────────┬─────────────────┘       └──────────────┬────────────────────────┘
                │                                        │
                └──────────────── corosync/knet ─────────┘
@@ -92,12 +92,20 @@ state-backend placement is in
   `ci-runner` AppRole for `pipeline.yml`; `scripts/vault-userpass-init.sh`
   configures the `operator-manual-apply` policy/login for manual applies
   from a laptop via `scripts/vault-apply-wrapper.sh`. Beyond the Proxmox
-  API token and MinIO credentials, Vault now also holds the two SSH public
-  keys every environment injects via cloud-init
-  (`proxmox/ssh-keys` → `vm_public_key`/`ci_public_key`) — see
+  API token and MinIO credentials, Vault now also holds the SSH public
+  key every environment injects via cloud-init
+  (`proxmox/ssh-keys` → `public_key`) — see
   [Secrets](#secrets) below. `/root/terraform-token.json` on the Proxmox
   host has been deleted now that its contents live in Vault
   (`proxmox/terraform-provider`).
+- **Tailscale** (LXC, distro systemd service) — dedicated tailnet node on
+  `bare-pve` (CT 400), stood up by `scripts/tailscale-lxc-init.sh`. Used as
+  an SSH jump-host onto the Proxmox hosts (Tailscale SSH + `ProxyJump`) and
+  a `tailscale serve` reverse-proxy for the Proxmox / MinIO / Vault web
+  UIs. Deliberately **no** `--advertise-routes` on `192.168.100.0/24` — see
+  [docs/architecture.md](docs/architecture.md#other-services) for why the
+  overlap with the Zenbook's direct LAN path is avoided rather than
+  configured around.
 - **Ansible** — post-provision configuration, delegated to
   [`swarm-lab`](../swarm-lab)'s playbook via a pinned git tag (see
   [CI/CD](#cicd) below)
@@ -154,9 +162,9 @@ from `~/.bashrc`, wraps the `terraform` command: the first time a plain
 fetches from Vault (CT 300) and exports as `TF_VAR_*`:
 
 - `proxmox_api_token` (`proxmox/terraform-provider`)
-- `vm_ssh_public_key` / `ci_ssh_public_key` (`proxmox/ssh-keys`)
+- `ssh_public_key` (`proxmox/ssh-keys` → `public_key`)
 - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` for the MinIO state backend
-  (`proxmox/minio-credentials`)
+  (`minio/credentials`)
 
 Only `minecraft-node`'s `playit_secret_key` isn't migrated yet — it still
 needs a manual `terraform.tfvars` (or `TF_VAR_playit_secret_key`) until
@@ -169,6 +177,27 @@ pulling wrapper updates).
 `pipeline.yml` (CI) is unaffected by any of this — it authenticates as the
 separate `ci-runner` AppRole and never touches the operator's userpass
 login.
+
+### Vault layout and downstream repos
+
+This repo is the base Proxmox install, so it owns the shared Vault paths
+every other repo in the lab reuses rather than duplicates:
+
+| Path | Fields | Used by |
+| --- | --- | --- |
+| `proxmox/terraform-provider` | `api_token` | anything with the Proxmox provider |
+| `proxmox/ssh-keys` | `public_key` (single, unified) | anything injecting a key via cloud-init |
+| `minio/credentials` | `access_key`, `secret_key` | anything with the S3 state backend |
+| `github-actions/*` | CI SSH key, runner PAT | `pipeline.yml` (`ci-runner` AppRole) |
+
+Every other service repo gets its **own** KV mount `<repo>/` with
+per-category paths and its own init script (`vault secrets enable
+-path=<repo> kv-v2`, a policy on the `<repo>/data/*` glob, attach to the
+operator / an AppRole). It reuses the shared paths above via the
+`proxmox/data/*` + `minio/data/*` globs already in `operator-manual-apply`
+— no edit to this repo's policy per downstream repo. Current downstream
+mounts: `oci/` (`oci-proxmox-node`), `k8s-lab/` (`k8s-lab`),
+`relief-landing/` (`relief-landing`), `tailscale/` (`tailscale-acl`).
 
 ## Repo layout
 
@@ -203,6 +232,7 @@ scripts/
 │                                     #   golden image, thin-pool autoextend threshold
 ├── minio-lxc-init.sh                 # Proxmox-side (bare-pve): MinIO LXC (state backend)
 ├── vault-lxc-init.sh                 # Proxmox-side (bare-pve): Vault LXC (CT 300), manual unseal
+├── tailscale-lxc-init.sh             # Proxmox-side (bare-pve): Tailscale LXC (CT 400), SSH jump-host + serve
 ├── vault-approle-init.sh             # Vault: ci-runner AppRole (CI-only, pipeline.yml)
 ├── vault-userpass-init.sh            # Vault: operator-manual-apply policy/login (laptop)
 ├── vault-apply-wrapper.sh            # Sourced shell wrapper: auto-fetches secrets for manual apply
@@ -295,7 +325,7 @@ pct exec 300 -- env VAULT_ADDR=http://127.0.0.1:8200 vault operator unseal   # x
 Vault comes back **sealed** after every CT/host restart — repeat the
 `operator unseal` step manually each time.
 
-Then wire up both auth paths and seed the SSH keys every environment
+Then wire up both auth paths and seed the SSH key every environment
 injects via cloud-init:
 
 ```bash
@@ -305,10 +335,9 @@ export VAULT_ADDR=http://192.168.100.200:8200
 ./scripts/vault-userpass-init.sh       # operator-manual-apply policy + your login
 
 vault kv put proxmox/ssh-keys \
-  vm_public_key="$(cat ~/.ssh/<your-key>.pub)" \
-  ci_public_key="$(cat ~/.ssh/<ci-deploy-key>.pub)"
+  public_key="$(cat ~/.ssh/<your-key>.pub)"
 
-vault kv get proxmox/ssh-keys          # confirm both fields landed
+vault kv get proxmox/ssh-keys          # confirm the field landed
 ```
 
 Then, once per shell session (or via `~/.bashrc`):
@@ -367,7 +396,7 @@ terraform apply -parallelism=1
 ```
 
 No `terraform.tfvars` needed if `vault-apply-wrapper.sh` is sourced —
-`proxmox_api_token`/`vm_ssh_public_key`/`ci_ssh_public_key` are fetched
+`proxmox_api_token`/`ssh_public_key` are fetched
 automatically on first use in this directory.
 
 `-parallelism=1` is not cosmetic — see
@@ -396,6 +425,24 @@ is the one exception still needing a manual `terraform.tfvars` for
 that Terraform can't reach (guest-OS config) — see
 [environments/immich-node/README.md](environments/immich-node/README.md).
 
+### 10. (Optional) Stand up the Tailscale jump-host (`bare-pve`)
+
+```bash
+TS_AUTHKEY=tskey-auth-... ssh root@192.168.100.30 'bash -s' < scripts/tailscale-lxc-init.sh
+```
+
+Creates CT 400 — a dedicated tailnet node (`lxc-bare-pve`, named after the
+host it runs on) used as an SSH `ProxyJump` onto the Proxmox hosts and a
+`tailscale serve` proxy for the web UIs. Not a Terraform resource: LXC has
+no cloud-init user-data path in Proxmox, so the install + `tailscale up`
+would need `null_resource` + SSH either way (see
+[docs/architecture.md](docs/architecture.md#other-services)). The auth key
+is a reusable key from the Tailscale admin console, not yet in Vault (same
+status as `minecraft-node`'s `playit_secret_key`). The script prints the
+`~/.ssh/config` snippet and the `tailscale serve` commands to run once
+afterward — `serve` needs HTTPS certificates enabled for the tailnet,
+which needs MagicDNS on (`tailscale-acl`'s `magic_dns = true`).
+
 ## CI/CD
 
 `.github/workflows/pipeline.yml` runs two jobs on the self-hosted runner,
@@ -417,16 +464,18 @@ at trigger time. See [swarm-lab's own README](../swarm-lab/README.md#cicd)
 for how its application images are versioned separately.
 
 Required repo secrets: `VAULT_ROLE_ID`, `VAULT_SECRET_ID`. Everything the
-pipeline needs (the Proxmox API token, the CI SSH private/public keys,
-MinIO credentials, the GitHub runner PAT) is fetched from Vault at job
-runtime via the `ci-runner` AppRole — see `scripts/vault-approle-init.sh`
-and the `Fetch secrets from Vault` step in both `provision` and `deploy`
-jobs of `pipeline.yml`. `PROXMOX_ENDPOINT`/`CI_SSH_PUBLIC_KEY`/
+pipeline needs (the Proxmox API token, the shared SSH public key, the CI
+SSH private key, MinIO credentials, the GitHub runner PAT) is fetched
+from Vault at job runtime via the `ci-runner` AppRole — see
+`scripts/vault-approle-init.sh` and the `Fetch secrets from Vault` step
+in both `provision` and `deploy` jobs of `pipeline.yml`. The CI SSH
+private key and runner PAT now live under `github-actions/*`; MinIO
+creds under `minio/credentials`. `PROXMOX_ENDPOINT`/`CI_SSH_PUBLIC_KEY`/
 `VM_SSH_PUBLIC_KEY` are no longer read from GitHub Secrets — the endpoint
 is derived from `proxmox_node` (see
 [Node placement](#node-placement-endpoint--golden-image-resolution) above)
-and both public keys now come from Vault's `proxmox/ssh-keys` path,
-matching the manual-apply path. The old repo secrets can be removed if
+and the public key now comes from Vault's `proxmox/ssh-keys` path
+(`public_key` field), matching the manual-apply path. The old repo secrets can be removed if
 nothing else references them.
 
 ## Status
@@ -496,9 +545,10 @@ nothing else references them.
       [Node placement](#node-placement-endpoint--golden-image-resolution)
       above and the `--link0`-adjacent entries in
       [docs/troubleshooting.md](docs/troubleshooting.md)).
-- [x] **SSH public keys (`vm_ssh_public_key`/`ci_ssh_public_key`) migrated
-      into Vault** (`proxmox/ssh-keys`) — `scripts/vault-apply-wrapper.sh`
-      fetches both alongside the API token and MinIO credentials.
+- [x] **SSH public key (`ssh_public_key`, was `vm_ssh_public_key`/
+      `ci_ssh_public_key`) migrated into Vault** (`proxmox/ssh-keys` →
+      `public_key`) — `scripts/vault-apply-wrapper.sh` fetches it
+      alongside the API token and MinIO credentials.
       Manual-apply environments (`runner`, `poly-nodes`, `minecraft-node`,
       `immich-node`) no longer need a filled-in
       `terraform.tfvars` at all, except `minecraft-node`'s

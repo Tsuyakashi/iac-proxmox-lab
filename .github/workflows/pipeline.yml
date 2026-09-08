@@ -46,15 +46,18 @@ jobs:
           # scripts/vault-apply-wrapper.sh — единый источник правды вместо
           # отдельной пары GitHub Secrets, которая могла разъехаться с тем,
           # что реально лежит в Vault.
-          VM_SSH_PUBLIC_KEY=$(VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=vm_public_key proxmox/ssh-keys)
-          CI_SSH_PUBLIC_KEY=$(VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=ci_public_key proxmox/ssh-keys)
-          echo "TF_VAR_vm_ssh_public_key=$VM_SSH_PUBLIC_KEY" >> "$GITHUB_ENV"
-          echo "TF_VAR_ci_ssh_public_key=$CI_SSH_PUBLIC_KEY" >> "$GITHUB_ENV"
+          # public_key — было vm_public_key + ci_public_key, теперь один
+          # общий ключ для пользователя и CI.
+          SSH_PUBLIC_KEY=$(VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=public_key proxmox/ssh-keys)
+          echo "TF_VAR_ssh_public_key=$SSH_PUBLIC_KEY" >> "$GITHUB_ENV"
 
-          VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=private_key proxmox/ci-ssh-key > ~/.ssh/ci_private_key_from_vault
+          # github-actions/ci-ssh-key — было proxmox/ci-ssh-key до
+          # реорганизации секретов по сервису/категории.
+          VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=private_key github-actions/ci-ssh-key > ~/.ssh/ci_private_key_from_vault
 
-          MINIO_ACCESS_KEY=$(VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=access_key proxmox/minio-credentials)
-          MINIO_SECRET_KEY=$(VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=secret_key proxmox/minio-credentials)
+          # minio/credentials — было proxmox/minio-credentials.
+          MINIO_ACCESS_KEY=$(VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=access_key minio/credentials)
+          MINIO_SECRET_KEY=$(VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=secret_key minio/credentials)
           echo "::add-mask::$MINIO_ACCESS_KEY"
           echo "::add-mask::$MINIO_SECRET_KEY"
           echo "AWS_ACCESS_KEY_ID=$MINIO_ACCESS_KEY" >> "$GITHUB_ENV"
@@ -104,9 +107,11 @@ jobs:
             secret_id="${{ secrets.VAULT_SECRET_ID }}")
           echo "::add-mask::$VAULT_TOKEN"
 
-          VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=private_key proxmox/ci-ssh-key > ~/.ssh/id_ed25519_from_vault
+          # github-actions/ci-ssh-key — было proxmox/ci-ssh-key.
+          VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=private_key github-actions/ci-ssh-key > ~/.ssh/id_ed25519_from_vault
 
-          GH_PAT=$(VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=token proxmox/github-runner-pat)
+          # github-actions/github-runner-pat — было proxmox/github-runner-pat.
+          GH_PAT=$(VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=token github-actions/github-runner-pat)
           echo "::add-mask::$GH_PAT"
           echo "GITHUB_PAT=$GH_PAT" >> "$GITHUB_ENV"
 

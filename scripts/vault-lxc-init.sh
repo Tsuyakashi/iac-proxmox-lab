@@ -37,7 +37,7 @@ set -e
 
 CTID=300
 CT_HOSTNAME="vault"
-CT_MEMORY=512
+CT_MEMORY=1024
 CT_CORES=1
 CT_DISK_GB=8
 CT_BRIDGE="vmbr0"
@@ -60,7 +60,7 @@ STORAGE="local-lvm"
 TEMPLATE_STORAGE="local"
 TEMPLATE="ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
 
-VAULT_VERSION="1.19.0"
+VAULT_VERSION="2.1.0"
 # Internal mirror on CT 200 (minio), bucket made anonymously-downloadable
 # via 'mc anonymous set download local/tools'. Plain binary (not a .zip),
 # uploaded manually — avoids depending on releases.hashicorp.com's uptime

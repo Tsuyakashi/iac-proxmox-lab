@@ -25,13 +25,12 @@ resource "proxmox_virtual_environment_file" "cloud_init_user_data" {
 
   source_raw {
     data = templatefile("${path.module}/templates/user-data.yml.tpl", {
-      ssh_public_key    = var.vm_ssh_public_key
-      ci_ssh_public_key = var.ci_ssh_public_key
-      hostname          = local.hostname
-      extra_packages    = var.extra_packages
-      extra_runcmd      = var.extra_runcmd
-      write_files       = var.write_files
-      docker_group      = var.docker_group
+      ssh_public_key = var.ssh_public_key
+      hostname       = local.hostname
+      extra_packages = var.extra_packages
+      extra_runcmd   = var.extra_runcmd
+      write_files    = var.write_files
+      docker_group   = var.docker_group
     })
     file_name = "${var.name}-user-data.yml"
   }

@@ -866,6 +866,15 @@ Worth remembering the next time another `TF_VAR_*` is added to
 `_tfv_fetch_secrets`: the gate list needs the new variable added too, or
 the same class of stale-cache skip repeats silently.
 
+**Later update:** `vm_ssh_public_key`/`ci_ssh_public_key` were merged into
+a single `ssh_public_key` (Vault `proxmox/ssh-keys` → `public_key`), so
+the gate and the immediate-fix `unset` now name just
+`TF_VAR_ssh_public_key`:
+
+```bash
+unset TF_VAR_proxmox_api_token TF_VAR_ssh_public_key
+```
+
 <a id="immich-node-endpoint-golden-image-mismatch-with-actual-node"></a>
 ## `immich-node`'s `proxmox_node` default (and README) said `bare-pve`; the VM has always actually lived on `pve-rog`
 
