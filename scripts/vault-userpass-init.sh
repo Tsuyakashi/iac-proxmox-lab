@@ -39,12 +39,11 @@
 # an hour; re-authenticating mid-troubleshooting is just friction, not a
 # meaningful security win for a LAN-only lab Vault.
 #
-# NOTE: proxmox/ssh-keys must actually contain the two public keys, and
+# NOTE: proxmox/ssh-keys must actually contain the public key, and
 # minio/credentials the S3 creds, before scripts/vault-apply-wrapper.sh
 # can read them:
 #   vault kv put proxmox/ssh-keys \
-#     vm_public_key="$(cat ~/.ssh/<your-key>.pub)" \
-#     ci_public_key="$(ssh-keygen -y -f <ci-private-key-path>)"
+#     public_key="$(cat ~/.ssh/<your-key>.pub)"
 #   vault kv put minio/credentials \
 #     access_key="<minio-user>" \
 #     secret_key="<minio-password>"

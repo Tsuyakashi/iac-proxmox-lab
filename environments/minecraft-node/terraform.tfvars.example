@@ -1,7 +1,7 @@
 # proxmox_endpoint  — теперь выводится из proxmox_node (см. locals.tf), не переменная.
 # proxmox_api_token — приходит через TF_VAR_proxmox_api_token из scripts/vault-apply-wrapper.sh.
-# vm_ssh_public_key / ci_ssh_public_key — приходят из Vault тем же враппером
-#   (proxmox/ssh-keys).
+# ssh_public_key — приходит из Vault тем же враппером (proxmox/ssh-keys ->
+#   public_key).
 #
 # playit_secret_key пока не в Vault (см. предупреждение в
 # scripts/vault-apply-wrapper.sh) — единственное, что реально нужно

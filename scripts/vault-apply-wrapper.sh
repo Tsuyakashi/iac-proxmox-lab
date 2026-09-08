@@ -24,7 +24,8 @@
 #
 # Secret layout (by service/category, not all under proxmox/*):
 #   proxmox/terraform-provider  — api_token
-#   proxmox/ssh-keys            — vm_public_key, ci_public_key
+#   proxmox/ssh-keys            — public_key (was vm_public_key +
+#                                  ci_public_key, now one shared key)
 #   minio/credentials           — access_key, secret_key (was
 #                                  proxmox/minio-credentials)
 #
@@ -42,9 +43,9 @@
 #     (root can read every path in Vault, not just what this repo needs).
 #     Prefer a userpass login day to day; save the root token for actual
 #     Vault administration (unseal, policy changes, etc).
-#   - proxmox/ssh-keys (vm_public_key / ci_public_key fields) and
-#     minio/credentials (access_key / secret_key fields) must exist in
-#     Vault, and operator-manual-apply's policy must grant read on both
+#   - proxmox/ssh-keys (public_key field) and minio/credentials
+#     (access_key / secret_key fields) must exist in Vault, and
+#     operator-manual-apply's policy must grant read on both
 #     — see scripts/vault-userpass-init.sh.
 #   - minecraft-node only: also needs proxmox/minecraft-playit-key in
 #     Vault (not yet migrated as of writing — playit_secret_key still
@@ -105,10 +106,8 @@ _tfv_fetch_secrets() {
     TF_VAR_proxmox_api_token="$(vault kv get -field=api_token proxmox/terraform-provider)" || return 1
     export TF_VAR_proxmox_api_token
 
-    TF_VAR_vm_ssh_public_key="$(vault kv get -field=vm_public_key proxmox/ssh-keys)" || return 1
-    TF_VAR_ci_ssh_public_key="$(vault kv get -field=ci_public_key proxmox/ssh-keys)" || return 1
-    export TF_VAR_vm_ssh_public_key
-    export TF_VAR_ci_ssh_public_key
+    TF_VAR_ssh_public_key="$(vault kv get -field=public_key proxmox/ssh-keys)" || return 1
+    export TF_VAR_ssh_public_key
 
     # minio/credentials — was proxmox/minio-credentials before the
     # secret-path reorganization.
@@ -139,18 +138,17 @@ if [ "${_tfv_sourced}" -eq 1 ]; then
         # требующему proxmox_api_token. Любой другой terraform-проект
         # на машине идёт мимо Vault как обычно.
         #
-        # Проверяем все три TF_VAR_*, за которые отвечает
+        # Проверяем оба TF_VAR_*, за которые отвечает
         # _tfv_fetch_secrets, а не только proxmox_api_token — иначе шелл
         # с уже закэшированным (из старой сессии) TF_VAR_proxmox_api_token,
-        # но без ssh-ключей (например, если враппер обновили уже после
+        # но без ssh-ключа (например, если враппер обновили уже после
         # того, как токен закэшировался в этом шелле), тихо пропускает
         # фетч новых секретов и terraform уходит в интерактивный запрос
         # переменных. См. docs/troubleshooting.md
         # #vault-apply-wrapper-stale-token-skips-ssh-key-fetch.
         if [ -f "./variables.tf" ] && grep -q "proxmox_api_token" ./variables.tf 2>/dev/null; then
             if [ -z "${TF_VAR_proxmox_api_token:-}" ] || \
-               [ -z "${TF_VAR_vm_ssh_public_key:-}" ] || \
-               [ -z "${TF_VAR_ci_ssh_public_key:-}" ]; then
+               [ -z "${TF_VAR_ssh_public_key:-}" ]; then
                 _tfv_fetch_secrets || return $?
             fi
         fi
