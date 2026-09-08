@@ -22,6 +22,12 @@
 # repo's environments/*. Any other terraform project on the same machine
 # is untouched; `terraform` behaves exactly like the real binary there.
 #
+# Secret layout (by service/category, not all under proxmox/*):
+#   proxmox/terraform-provider  — api_token
+#   proxmox/ssh-keys            — vm_public_key, ci_public_key
+#   minio/credentials           — access_key, secret_key (was
+#                                  proxmox/minio-credentials)
+#
 # Requires:
 #   - VAULT_ADDR set (defaults below to the CT 300 address on the LAN)
 #   - vault CLI logged in via a method with read access to the
@@ -36,16 +42,18 @@
 #     (root can read every path in Vault, not just what this repo needs).
 #     Prefer a userpass login day to day; save the root token for actual
 #     Vault administration (unseal, policy changes, etc).
-#   - proxmox/ssh-keys (vm_public_key / ci_public_key fields) must exist
-#     in Vault, and operator-manual-apply's policy must grant read on
-#     proxmox/data/ssh-keys — see scripts/vault-userpass-init.sh.
+#   - proxmox/ssh-keys (vm_public_key / ci_public_key fields) and
+#     minio/credentials (access_key / secret_key fields) must exist in
+#     Vault, and operator-manual-apply's policy must grant read on both
+#     — see scripts/vault-userpass-init.sh.
 #   - minecraft-node only: also needs proxmox/minecraft-playit-key in
 #     Vault (not yet migrated as of writing — playit_secret_key still
 #     comes from terraform.tfvars there until that KV path exists; the
 #     function warns instead of failing silently).
 #
 # Does NOT fetch the CI SSH private key or the GitHub runner PAT — those
-# are pipeline.yml-only concerns, irrelevant to a manual apply.
+# now live under github-actions/* and are pipeline.yml-only concerns,
+# irrelevant to a manual apply.
 #
 # Executing this file directly (not sourcing it) still works too, for
 # one-off/scripted use — fetches secrets then execs terraform with
@@ -102,8 +110,10 @@ _tfv_fetch_secrets() {
     export TF_VAR_vm_ssh_public_key
     export TF_VAR_ci_ssh_public_key
 
-    AWS_ACCESS_KEY_ID="$(vault kv get -field=access_key proxmox/minio-credentials)" || return 1
-    AWS_SECRET_ACCESS_KEY="$(vault kv get -field=secret_key proxmox/minio-credentials)" || return 1
+    # minio/credentials — was proxmox/minio-credentials before the
+    # secret-path reorganization.
+    AWS_ACCESS_KEY_ID="$(vault kv get -field=access_key minio/credentials)" || return 1
+    AWS_SECRET_ACCESS_KEY="$(vault kv get -field=secret_key minio/credentials)" || return 1
     export AWS_ACCESS_KEY_ID
     export AWS_SECRET_ACCESS_KEY
 
@@ -136,9 +146,7 @@ if [ "${_tfv_sourced}" -eq 1 ]; then
         # того, как токен закэшировался в этом шелле), тихо пропускает
         # фетч новых секретов и terraform уходит в интерактивный запрос
         # переменных. См. docs/troubleshooting.md
-        # #vault-apply-wrapper-stale-token-skips-ssh-key-fetch — это тот
-        # самый баг, задокументированный там как "landed in the wrapper",
-        # но реально попавший в код только сейчас.
+        # #vault-apply-wrapper-stale-token-skips-ssh-key-fetch.
         if [ -f "./variables.tf" ] && grep -q "proxmox_api_token" ./variables.tf 2>/dev/null; then
             if [ -z "${TF_VAR_proxmox_api_token:-}" ] || \
                [ -z "${TF_VAR_vm_ssh_public_key:-}" ] || \

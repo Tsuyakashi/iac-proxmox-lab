@@ -15,12 +15,16 @@
 #     — reusing it for a human on a laptop would mean one leaked laptop
 #     and one leaked GitHub Secret both have to be rotated together.
 #   - operator-manual-apply's policy is intentionally narrower: no
-#     ci-ssh-key, no github-runner-pat — see the path list below. A
-#     manual `terraform apply` from a laptop only ever needs the Proxmox
-#     API token, the SSH public keys, and the MinIO (state backend)
-#     credentials; the CI SSH *private* key and GitHub PAT are
-#     pipeline.yml-only concerns (Ansible deploy / runner
+#     github-actions/* at all. A manual `terraform apply` from a laptop
+#     only ever needs the Proxmox API token, the SSH public keys, and the
+#     MinIO (state backend) credentials; the CI SSH *private* key and
+#     GitHub PAT are pipeline.yml-only concerns (Ansible deploy / runner
 #     self-registration), never touched by vault-apply-wrapper.sh.
+#
+# Secrets are now organized by service/category, not all under proxmox/*:
+#   proxmox/*  — API token, SSH public keys (paths unchanged)
+#   minio/*    — S3 backend credentials (was proxmox/minio-credentials)
+# github-actions/* exists but is intentionally NOT granted here — see above.
 #
 # Run once against Vault (CT 300), same way as vault-approle-init.sh:
 #   VAULT_ADDR=http://192.168.100.200:8200 ./scripts/vault-userpass-init.sh
@@ -35,11 +39,15 @@
 # an hour; re-authenticating mid-troubleshooting is just friction, not a
 # meaningful security win for a LAN-only lab Vault.
 #
-# NOTE: proxmox/data/ssh-keys must actually contain the two public keys
-# before scripts/vault-apply-wrapper.sh can read them:
+# NOTE: proxmox/ssh-keys must actually contain the two public keys, and
+# minio/credentials the S3 creds, before scripts/vault-apply-wrapper.sh
+# can read them:
 #   vault kv put proxmox/ssh-keys \
 #     vm_public_key="$(cat ~/.ssh/<your-key>.pub)" \
 #     ci_public_key="$(ssh-keygen -y -f <ci-private-key-path>)"
+#   vault kv put minio/credentials \
+#     access_key="<minio-user>" \
+#     secret_key="<minio-password>"
 # This script only grants the read policy — it doesn't seed the values.
 
 set -e
@@ -47,18 +55,11 @@ set -e
 
 vault auth enable userpass 2>/dev/null || true
 
-# ssh-keys added here — the two SSH public keys (not secret by nature, but
-# centralizing them in Vault means no environment's terraform.tfvars needs
-# to carry them anymore, same reasoning as the API token/MinIO creds. No
-# ci-ssh-key (the private key) / github-runner-pat here — see header.
 vault policy write operator-manual-apply - <<EOF
-path "proxmox/data/terraform-provider" {
+path "proxmox/data/*" {
   capabilities = ["read"]
 }
-path "proxmox/data/minio-credentials" {
-  capabilities = ["read"]
-}
-path "proxmox/data/ssh-keys" {
+path "minio/data/*" {
   capabilities = ["read"]
 }
 EOF

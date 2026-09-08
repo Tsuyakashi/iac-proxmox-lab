@@ -4,20 +4,19 @@ set -e
 
 vault auth enable approle 2>/dev/null || true
 
+# Секреты разложены по сервису/категории, не всё под proxmox/*:
+#   proxmox/*         — API token, SSH-ключи для VM/CI (пути не менялись)
+#   minio/*           — креды S3-бэкенда (было proxmox/minio-credentials)
+#   github-actions/*  — CI SSH private key, runner PAT
+#                        (было proxmox/ci-ssh-key, proxmox/github-runner-pat)
 vault policy write terraform-provisioner - <<EOF
-path "proxmox/data/terraform-provider" {
+path "proxmox/data/*" {
   capabilities = ["read"]
 }
-path "proxmox/data/ci-ssh-key" {
+path "minio/data/*" {
   capabilities = ["read"]
 }
-path "proxmox/data/ssh-keys" {
-  capabilities = ["read"]
-}
-path "proxmox/data/minio-credentials" {
-  capabilities = ["read"]
-}
-path "proxmox/data/github-runner-pat" {
+path "github-actions/data/*" {
   capabilities = ["read"]
 }
 EOF
