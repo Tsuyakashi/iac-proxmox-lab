@@ -15,9 +15,11 @@
 # Purpose of this container: a dedicated tailnet node used as
 #   - SSH jump-host onto the Proxmox hosts (ProxyJump in ~/.ssh/config),
 #     via Tailscale SSH (`tailscale up --ssh`)
-#   - `tailscale serve` reverse-proxy for the Proxmox / MinIO / Vault web
-#     UIs (set up manually once, see the footer — needs HTTPS certificates
-#     enabled for the tailnet, which requires MagicDNS on)
+#   - `tailscale serve` reverse-proxy for the Proxmox / Vault UIs, the
+#     MinIO console and the MinIO S3 API (set up manually once, see the
+#     footer — needs HTTPS certificates enabled for the tailnet, which
+#     requires MagicDNS on). Access to all four ports is restricted to
+#     group:lxc-admin + admins in the tailscale-acl repo.
 #
 # The CT and its tailnet node are named lxc-<pve-node> (e.g. lxc-bare-pve),
 # derived from the host this runs on — so a second one on another node is
@@ -196,9 +198,14 @@ echo "      HostName ${PVE_NODE_IP:-<this-node-ip>}"
 echo "      ProxyJump ts-jump"
 echo "      User root"
 echo ""
-echo "Web UIs via 'tailscale serve' (run once inside the CT; needs HTTPS"
+echo "Web UIs + APIs via 'tailscale serve' (run once inside the CT; needs HTTPS"
 echo "certificates enabled for the tailnet — DNS settings in the admin"
-echo "console, MagicDNS must be on):"
+echo "console, MagicDNS must be on). --bg persists across CT/tailscaled restarts:"
 echo "  pct exec ${CTID} -- tailscale serve --bg --https=8006 https+insecure://192.168.100.30:8006  # proxmox"
 echo "  pct exec ${CTID} -- tailscale serve --bg --https=9001 http://192.168.100.100:9001           # minio console"
-echo "  pct exec ${CTID} -- tailscale serve --bg --https=8200 http://192.168.100.200:8200           # vault ui"
+echo "  pct exec ${CTID} -- tailscale serve --bg --https=9000 http://192.168.100.100:9000           # minio S3 API"
+echo "  pct exec ${CTID} -- tailscale serve --bg --https=8200 http://192.168.100.200:8200           # vault ui/API"
+echo ""
+echo "The S3 API proxy (9000) is what lets tf-secrets / the terraform S3"
+echo "backend reach MinIO from off-LAN. All four ports are restricted to"
+echo "group:lxc-admin + admins in the tailscale-acl repo (host 'lxc-jump')."
