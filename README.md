@@ -178,6 +178,27 @@ pulling wrapper updates).
 separate `ci-runner` AppRole and never touches the operator's userpass
 login.
 
+### Vault layout and downstream repos
+
+This repo is the base Proxmox install, so it owns the shared Vault paths
+every other repo in the lab reuses rather than duplicates:
+
+| Path | Fields | Used by |
+| --- | --- | --- |
+| `proxmox/terraform-provider` | `api_token` | anything with the Proxmox provider |
+| `proxmox/ssh-keys` | `public_key` (single, unified) | anything injecting a key via cloud-init |
+| `minio/credentials` | `access_key`, `secret_key` | anything with the S3 state backend |
+| `github-actions/*` | CI SSH key, runner PAT | `pipeline.yml` (`ci-runner` AppRole) |
+
+Every other service repo gets its **own** KV mount `<repo>/` with
+per-category paths and its own init script (`vault secrets enable
+-path=<repo> kv-v2`, a policy on the `<repo>/data/*` glob, attach to the
+operator / an AppRole). It reuses the shared paths above via the
+`proxmox/data/*` + `minio/data/*` globs already in `operator-manual-apply`
+— no edit to this repo's policy per downstream repo. Current downstream
+mounts: `oci/` (`oci-proxmox-node`), `k8s-lab/` (`k8s-lab`),
+`relief-landing/` (`relief-landing`), `tailscale/` (`tailscale-acl`).
+
 ## Repo layout
 
 Standard `modules/` + `environments/` split. `modules/proxmox-vm` is the one
