@@ -25,8 +25,7 @@ module "ci_runner" {
   # IP известен заранее (static), нет смысла ждать guest agent на apply
   wait_for_ip_disabled = true
 
-  vm_ssh_public_key = var.vm_ssh_public_key
-  ci_ssh_public_key = var.ci_ssh_public_key
+  ssh_public_key = var.ssh_public_key
 
   docker_group   = true
   extra_packages = []

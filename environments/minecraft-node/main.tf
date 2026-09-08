@@ -34,8 +34,7 @@ module "node" {
   }
   wait_for_ip_disabled = true
 
-  vm_ssh_public_key = var.vm_ssh_public_key
-  ci_ssh_public_key = var.ci_ssh_public_key
+  ssh_public_key = var.ssh_public_key
 
   # явно зависим от готовности моста/NAT, иначе VM может стартовать раньше
   depends_on = [proxmox_network_linux_bridge.isolated]
