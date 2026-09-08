@@ -29,8 +29,8 @@ here (nested → bare metal, the flat-layout → modules refactor), see
 │       ├ VM 9001 golden image   │       │       ├ VM 9000 golden image (own)    │
 │       ├ prod/stage/dev nodes   │       │       ├ CT 200: minio (state backend) │
 │       ├ poly-nodes             │       │       ├ CT 300: vault (secrets)       │
-│       └ VM 101: immich-node    │       │       └ VM: ci-runner                 │
-│         (see note below)       │       │                                       │
+│       └ VM 101: immich-node    │       │       ├ CT 400: tailscale (jump-host) │
+│         (see note below)       │       │       └ VM: ci-runner                 │
 └──────────────┬─────────────────┘       └──────────────┬────────────────────────┘
                │                                        │
                └──────────────── corosync/knet ─────────┘
@@ -98,6 +98,14 @@ state-backend placement is in
   [Secrets](#secrets) below. `/root/terraform-token.json` on the Proxmox
   host has been deleted now that its contents live in Vault
   (`proxmox/terraform-provider`).
+- **Tailscale** (LXC, distro systemd service) — dedicated tailnet node on
+  `bare-pve` (CT 400), stood up by `scripts/tailscale-lxc-init.sh`. Used as
+  an SSH jump-host onto the Proxmox hosts (Tailscale SSH + `ProxyJump`) and
+  a `tailscale serve` reverse-proxy for the Proxmox / MinIO / Vault web
+  UIs. Deliberately **no** `--advertise-routes` on `192.168.100.0/24` — see
+  [docs/architecture.md](docs/architecture.md#other-services) for why the
+  overlap with the Zenbook's direct LAN path is avoided rather than
+  configured around.
 - **Ansible** — post-provision configuration, delegated to
   [`swarm-lab`](../swarm-lab)'s playbook via a pinned git tag (see
   [CI/CD](#cicd) below)
@@ -203,6 +211,7 @@ scripts/
 │                                     #   golden image, thin-pool autoextend threshold
 ├── minio-lxc-init.sh                 # Proxmox-side (bare-pve): MinIO LXC (state backend)
 ├── vault-lxc-init.sh                 # Proxmox-side (bare-pve): Vault LXC (CT 300), manual unseal
+├── tailscale-lxc-init.sh             # Proxmox-side (bare-pve): Tailscale LXC (CT 400), SSH jump-host + serve
 ├── vault-approle-init.sh             # Vault: ci-runner AppRole (CI-only, pipeline.yml)
 ├── vault-userpass-init.sh            # Vault: operator-manual-apply policy/login (laptop)
 ├── vault-apply-wrapper.sh            # Sourced shell wrapper: auto-fetches secrets for manual apply
@@ -394,6 +403,24 @@ is the one exception still needing a manual `terraform.tfvars` for
 `pipeline.yml`. `immich-node` needs a manual pass after the first `apply`
 that Terraform can't reach (guest-OS config) — see
 [environments/immich-node/README.md](environments/immich-node/README.md).
+
+### 10. (Optional) Stand up the Tailscale jump-host (`bare-pve`)
+
+```bash
+TS_AUTHKEY=tskey-auth-... ssh root@192.168.100.30 'bash -s' < scripts/tailscale-lxc-init.sh
+```
+
+Creates CT 400 — a dedicated tailnet node (`lxc-bare-pve`, named after the
+host it runs on) used as an SSH `ProxyJump` onto the Proxmox hosts and a
+`tailscale serve` proxy for the web UIs. Not a Terraform resource: LXC has
+no cloud-init user-data path in Proxmox, so the install + `tailscale up`
+would need `null_resource` + SSH either way (see
+[docs/architecture.md](docs/architecture.md#other-services)). The auth key
+is a reusable key from the Tailscale admin console, not yet in Vault (same
+status as `minecraft-node`'s `playit_secret_key`). The script prints the
+`~/.ssh/config` snippet and the `tailscale serve` commands to run once
+afterward — `serve` needs HTTPS certificates enabled for the tailnet,
+which needs MagicDNS on (`tailscale-acl`'s `magic_dns = true`).
 
 ## CI/CD
 

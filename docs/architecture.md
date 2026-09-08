@@ -249,6 +249,52 @@ This is a separate, manual step from the script on purpose — the script
 only prepares the NFS server side (per-node action), while `pvesm add` is a
 cluster-wide action that only makes sense to run once, not per-node.
 
+## Other services
+
+### Tailscale jump-host (CT 400, `bare-pve`)
+
+`scripts/tailscale-lxc-init.sh` stands up a dedicated unprivileged LXC on
+`bare-pve` that joins the tailnet as a plain node. The CT and its tailnet
+hostname are `lxc-<pve-node>` (`lxc-bare-pve` here), derived from
+`hostname -s` on the host it runs on, so a second one on `pve-rog` is
+`lxc-pve-rog` with no collision and `ssh lxc-bare-pve` works via MagicDNS.
+Two jobs:
+
+- **SSH jump-host.** `~/.ssh/config` uses it as `ProxyJump` onto the
+  Proxmox hosts; auth is Tailscale SSH (`tailscale up --ssh`), so no Unix
+  key is strictly needed. The point is the *second* hop: it leaves the CT
+  over its own `vmbr0` interface as an ordinary LAN client, nothing to do
+  with tailscale routing — so it behaves identically whether the laptop is
+  home or away.
+- **`tailscale serve` for the web UIs** (Proxmox / MinIO console / Vault
+  UI) — HTTPS via the tailnet's MagicDNS cert, listening only on the CT's
+  tailscale interface. Set up by hand once (the script prints the
+  commands); needs **HTTPS certificates** enabled for the tailnet (DNS
+  settings in the admin console), which in turn needs MagicDNS on — the
+  `tailscale-acl` repo's `magic_dns` was flipped to `true` for this.
+
+**No `--advertise-routes` on `192.168.100.0/24`.** The Zenbook (QDevice
+arbiter) is physically on that LAN when home, so advertising the same /24
+overlaps its direct L2 path — two routes to one subnet, the exact
+"works away, flaky at home" asymmetry already seen with the QDevice
+([troubleshooting.md](troubleshooting.md#recovering-a-lost-qdevice-arbiter-mid-cluster)).
+A jump-host avoids the overlap entirely instead of configuring around it.
+
+**Not a Terraform resource.** Unlike VMs, Proxmox LXC has no cloud-init
+user-data path — the `bpg/proxmox` container `initialization` block only
+does hostname / DNS / IP / SSH-key, no `runcmd`. So the actual work
+(install tailscale, `tailscale up` with an auth key) would need
+`null_resource` + `remote-exec` over SSH regardless, and a plain host-side
+`pct` script (same shape as `minio-lxc-init.sh` / `vault-lxc-init.sh`)
+carries less baggage than half-declaring it in a Terraform state
+lifecycle. `/dev/net/tun` goes in via the native `pct set -dev0` device
+passthrough (Proxmox VE 8.1+), not the `lxc.mount.entry` / cgroup2 hack in
+`/etc/pve/lxc/<ctid>.conf`. `keyctl=1` is required in the container
+features or `tailscaled` won't start in an unprivileged LXC.
+
+The auth key (reusable, from the Tailscale admin console) is not in Vault
+yet — same status as `minecraft-node`'s `playit_secret_key`.
+
 ## The `TerraformProv` role, and why it needs what it needs
 
 Proxmox's privilege model is granular enough that the "obvious" set of
