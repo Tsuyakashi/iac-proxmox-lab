@@ -9,8 +9,8 @@ replacement for `swarm-lab`'s own `Vagrantfile` — that stays, so `swarm-lab`
 remains fully self-contained and can be spun up on its own hardware without
 this repo (see [CI/CD](#cicd) for how the two connect via a pinned tag).
 
-For the full reasoning behind the topology, the state-backend split, and
-the raw-disk/USB passthrough pattern, see
+For the full reasoning behind the topology, the state-backend split, the
+raw-disk/USB passthrough pattern, and the cluster firewall, see
 **[docs/architecture.md](docs/architecture.md)**. For "things that actually
 broke and how" (the big one), see
 **[docs/troubleshooting.md](docs/troubleshooting.md)**. For how the repo got
@@ -197,7 +197,8 @@ operator / an AppRole). It reuses the shared paths above via the
 `proxmox/data/*` + `minio/data/*` globs already in `operator-manual-apply`
 — no edit to this repo's policy per downstream repo. Current downstream
 mounts: `oci/` (`oci-proxmox-node`), `k8s-lab/` (`k8s-lab`),
-`relief-landing/` (`relief-landing`), `tailscale/` (`tailscale-acl`).
+`relief-landing/` (`relief-landing`), `tailscale/` (`tailscale-acl`),
+`valheim/` (`valheim-lxc`).
 
 ## Repo layout
 
@@ -532,6 +533,11 @@ nothing else references them.
 - [x] MinIO (CT 200) and the CI runner live on `bare-pve`
 - [x] `TerraformProv` role/ACLs live in `/etc/pve` (pmxcfs), cluster-wide —
       no per-node re-verification needed
+- [x] Datacenter firewall enabled cluster-wide (management IPSet, corosync/
+      Tailscale/SSH/UI + Valheim-ingress ACCEPT rules, per-node rollout
+      without lockout) — needed so downstream guests get veth-level
+      isolation; config still pmxcfs-only, see
+      [docs/architecture.md#cluster-firewall](docs/architecture.md#cluster-firewall)
 - [x] Vault (CT 300) stood up on `bare-pve` — LXC, systemd, raft storage,
       `mlock` genuinely enforced, initialized and unsealed. Wired into
       both the CI pipeline (`ci-runner` AppRole) and manual applies

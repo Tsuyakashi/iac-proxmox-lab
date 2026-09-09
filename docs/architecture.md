@@ -249,6 +249,74 @@ This is a separate, manual step from the script on purpose — the script
 only prepares the NFS server side (per-node action), while `pvesm add` is a
 cluster-wide action that only makes sense to run once, not per-node.
 
+## Cluster firewall
+
+Proxmox's per-guest firewall (`net<n>: firewall=1` plus a guest `<vmid>.fw`)
+only does anything once the **datacenter-wide** firewall is enabled — a
+single cluster-wide switch, off by default. It was turned on so a guest can
+be given a boundary that holds *outside* itself. The trigger was
+[`valheim-lxc`](../../valheim-lxc): its game CT (510, on `pve-rog`) must not
+be able to reach the rest of the LAN — MinIO, Vault, the Proxmox API, other
+guests — and its threat model is RCE in the game server → root in the
+container, so anything enforced *inside* the container (an `nftables` table
+there, say) is one command away from being removed. With the datacenter
+firewall on, that CT's Terraform-managed `firewall_options` /
+`firewall_rules` compile to iptables on `veth510i0` on the host, where a
+root shell in the container can't touch them.
+
+**Why this needed preparation.** `host.fw` on every node defaults to
+`enable: 1`, and SSH (22) / the web UI (8006) / corosync are auto-allowed
+only *from the `management` IPSet* — which was empty. Flipping the switch
+unprepared drops management access on all three nodes at once, recoverable
+only from a physical console — and `oci-pve` (the OCI ARM node) has none.
+
+Done in this order:
+
+1. **`management` IPSet** — `192.168.100.0/24` (home LAN) and
+   `100.64.0.0/10` (the whole tailnet CGNAT range, so a roaming admin
+   device is always in it). The tailnet is already default-deny in
+   `tailscale-acl` and the hosts' `sshd` still wants a key, so widening the
+   set to the CGNAT range rather than pinning device IPs is an accepted
+   trade-off.
+2. **Explicit cluster ACCEPT rules** (`/cluster/firewall/rules`), created
+   disabled, then enabled one at a time:
+
+   | proto / port | source | for |
+   |---|---|---|
+   | `udp 5405,5406` | `+management` | corosync — link0 **and** link1; the real ports, read off `ss -ulnp \| grep corosync`, not assumed |
+   | `udp 41641` | any | Tailscale WireGuard (peers roam — no source restriction) |
+   | `tcp 22,8006` | `+management` | SSH + web UI |
+   | `udp 2456-2458` | any | Valheim public ingress, relayed in on `oci-pve`'s public IP |
+
+3. **Pre-empt lockout on the nodes with no easy recovery.** Before touching
+   the cluster switch, `pve-rog` and `oci-pve` each got an explicit
+   `/etc/pve/nodes/<node>/host.fw` with `enable: 0` — a node-level override
+   that neutralises the cluster switch on that node. `bare-pve` (which has a
+   console) was left inheriting and tested first.
+4. **Enable per node, checking from a fresh SSH session between steps.**
+   `pvesh set /cluster/firewall/options --enable 1` brings up `bare-pve`;
+   then `pve-rog` and `oci-pve` are switched in by flipping their `host.fw`
+   to `enable: 1`, each followed by `pve-firewall compile` and a new session
+   that must still connect.
+
+**Current state:**
+
+| Node | `host.fw` | |
+|---|---|---|
+| `bare-pve` | inherits cluster | MinIO / Vault / jump-host reachable |
+| `pve-rog` | `enable: 1` | `valheim-lxc`'s CT 510 walled off from `192.168.100.0/24` on `veth510i0` |
+| `oci-pve` | `enable: 1` | public Valheim UDP passes via the cluster ingress rule |
+
+**This config lives only in pmxcfs** (`/etc/pve/firewall/`) — same as the
+`TerraformProv` role and `pvesm add shared-storage`: cluster-wide, applied
+once, not yet expressed as code. A cluster rebuild or a stray UI edit loses
+it silently; folding it into `proxmox-init.sh` (or a dedicated
+`scripts/cluster-firewall-init.sh`) is a follow-up.
+
+Enabling the firewall on `oci-pve` initially broke the public Valheim
+ingress before rule 4 above existed — see
+[troubleshooting.md](troubleshooting.md#datacenter-firewall-valheim-ingress).
+
 ## Other services
 
 ### Tailscale jump-host (CT 400, `bare-pve`)

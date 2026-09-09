@@ -916,3 +916,37 @@ turns out to be wrong — see also the `minecraft-node` cross-node-clone fix
 elsewhere in this file, same underlying pattern (two Proxmox-node-shaped
 values that can drift independently unless one is derived from the
 other).
+
+<a id="datacenter-firewall-valheim-ingress"></a>
+## Enabling the datacenter firewall on the live cluster silently dropped the public Valheim UDP ingress on `oci-pve`
+
+Right after `oci-pve`'s `host.fw` was flipped to `enable: 1` (see
+[architecture.md](architecture.md#cluster-firewall) for the whole
+enablement), the Valheim server stopped answering from the internet — the
+person asked to test it just said "it's down". Nothing on the game CT's
+side; the packets weren't arriving at all.
+
+`oci-pve` terminates the public game traffic (UDP 2456-2458 on its public
+IP) and `socat`-relays it into the CT over Tailscale. With the datacenter
+firewall now on and the host input policy defaulting to `DROP`, those
+ports matched no ACCEPT rule and were dropped by `PVEFW-Drop` before
+`socat` ever saw them. The corosync / SSH / Tailscale rules had been added
+deliberately; the game ingress was overlooked because it isn't management
+traffic — it's the one cluster ingress rule that exists purely for a
+downstream repo.
+
+Fix — one more cluster rule:
+
+```sh
+pvesh create /cluster/firewall/rules --type in --action ACCEPT \
+  --proto udp --dport 2456:2458 --comment "Valheim public ingress (oci-pve)"
+```
+
+with a wrinkle worth remembering: `--pos N` on rule creation **inserts**
+at position N and renumbers everything after it — the first attempt passed
+`--pos 3` expecting an append, which shifted the existing rules so the
+follow-up `--enable 1` toggled the wrong one. Read the index `pvesh`
+actually reports back and enable that.
+
+Confirmed in `pve-firewall compile`:
+`-A PVEFW-HOST-IN -p udp --dport 2456:2458 -j RETURN`.
