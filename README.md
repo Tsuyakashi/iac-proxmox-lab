@@ -98,8 +98,10 @@ state-backend placement is in
   [Secrets](#secrets) below. `/root/terraform-token.json` on the Proxmox
   host has been deleted now that its contents live in Vault
   (`proxmox/terraform-provider`).
-- **Tailscale** (LXC, distro systemd service) — dedicated tailnet node on
-  `bare-pve` (CT 400), stood up by `scripts/tailscale-lxc-init.sh`. Used as
+- **Tailscale** (LXC, distro systemd service) — dedicated tailnet node,
+  stood up by `scripts/tailscale-lxc-init.sh` on whichever node it runs on
+  (CTID + LAN IP keyed on the node name: `bare-pve` → CT 400, `pve-rog` →
+  CT 420). Used as
   an SSH jump-host onto the Proxmox hosts (Tailscale SSH + `ProxyJump`) and
   a `tailscale serve` reverse-proxy for the Proxmox / MinIO / Vault web
   UIs. Deliberately **no** `--advertise-routes` on `192.168.100.0/24` — see
@@ -232,7 +234,7 @@ scripts/
 │                                     #   golden image, thin-pool autoextend threshold
 ├── minio-lxc-init.sh                 # Proxmox-side (bare-pve): MinIO LXC (state backend)
 ├── vault-lxc-init.sh                 # Proxmox-side (bare-pve): Vault LXC (CT 300), manual unseal
-├── tailscale-lxc-init.sh             # Proxmox-side (bare-pve): Tailscale LXC (CT 400), SSH jump-host + serve
+├── tailscale-lxc-init.sh             # Proxmox-side: Tailscale LXC (CT 400 bare-pve / 420 pve-rog), SSH jump-host + serve
 ├── vault-approle-init.sh             # Vault: ci-runner AppRole (CI-only, pipeline.yml)
 ├── vault-userpass-init.sh            # Vault: operator-manual-apply policy/login (laptop)
 ├── vault-apply-wrapper.sh            # Sourced shell wrapper: auto-fetches secrets for manual apply
@@ -425,14 +427,16 @@ is the one exception still needing a manual `terraform.tfvars` for
 that Terraform can't reach (guest-OS config) — see
 [environments/immich-node/README.md](environments/immich-node/README.md).
 
-### 10. (Optional) Stand up the Tailscale jump-host (`bare-pve`)
+### 10. (Optional) Stand up the Tailscale jump-host
 
 ```bash
 TS_AUTHKEY=tskey-auth-... ssh root@192.168.100.30 'bash -s' < scripts/tailscale-lxc-init.sh
 ```
 
-Creates CT 400 — a dedicated tailnet node (`lxc-bare-pve`, named after the
-host it runs on) used as an SSH `ProxyJump` onto the Proxmox hosts and a
+Creates a dedicated tailnet node (`lxc-<node>`, named after the host it runs
+on — CTID and LAN IP are keyed on that name: `bare-pve` → CT 400, `pve-rog`
+→ CT 420, an unlisted node is a hard error). Used as an SSH `ProxyJump` onto
+the Proxmox hosts and a
 `tailscale serve` proxy for the web UIs. Not a Terraform resource: LXC has
 no cloud-init user-data path in Proxmox, so the install + `tailscale up`
 would need `null_resource` + SSH either way (see

@@ -251,14 +251,15 @@ cluster-wide action that only makes sense to run once, not per-node.
 
 ## Other services
 
-### Tailscale jump-host (CT 400, `bare-pve`)
+### Tailscale jump-host (CT 400 on `bare-pve`, CT 420 on `pve-rog`)
 
 `scripts/tailscale-lxc-init.sh` stands up a dedicated unprivileged LXC on
-`bare-pve` that joins the tailnet as a plain node. The CT and its tailnet
-hostname are `lxc-<pve-node>` (`lxc-bare-pve` here), derived from
-`hostname -s` on the host it runs on, so a second one on `pve-rog` is
-`lxc-pve-rog` with no collision and `ssh lxc-bare-pve` works via MagicDNS.
-Two jobs:
+whichever node it runs on, joining the tailnet as a plain node. The CT and
+its tailnet hostname are `lxc-<pve-node>` (`lxc-bare-pve` / `lxc-pve-rog`),
+derived from `hostname -s`, and the CTID + LAN IP are keyed on that same
+name (`bare-pve` → CT 400 / `.230`, `pve-rog` → CT 420 / `.220`; an
+unlisted node is a hard error) — so a second one collides on nothing and
+`ssh lxc-bare-pve` works via MagicDNS. Two jobs:
 
 - **SSH jump-host.** `~/.ssh/config` uses it as `ProxyJump` onto the
   Proxmox hosts; auth is Tailscale SSH (`tailscale up --ssh`), so no Unix

@@ -46,17 +46,30 @@ set -e
 # name (bare-pve / pve-rog).
 PVE_NODE="$(hostname -s)"
 
-CTID=400
+# Per-node identity. A jump-host on a second node must not collide with the
+# first on CTID or LAN IP, so both are keyed on the node name rather than
+# hardcoded — run the same script on bare-pve and on pve-rog and each gets
+# its own CT. Every IP here is pinned (not DHCP, same reasoning as CT
+# 200/300 — see README Troubleshooting notes, DHCP-drift entry) and sits
+# clear of every environment's static range (nodes .101-.103, poly-nodes
+# .110-.112, immich .60, runner .50) and of minio(.100) / vault(.200).
+# An unlisted node is a hard error: add a case entry (unique CTID + a free
+# 192.168.100.x) before running this there.
+case "${PVE_NODE}" in
+    bare-pve) CTID=400; CT_IP="192.168.100.230/24" ;;
+    pve-rog)  CTID=420; CT_IP="192.168.100.220/24" ;;
+    *)
+        echo "tailscale-lxc-init: no CTID / LAN-IP mapping for node '${PVE_NODE}'." >&2
+        echo "Add a 'case' entry above (unique CTID + free 192.168.100.x) and re-run." >&2
+        exit 1
+        ;;
+esac
+
 CT_HOSTNAME="lxc-${PVE_NODE}"
 CT_MEMORY=512
 CT_CORES=1
 CT_DISK_GB=8
 CT_BRIDGE="vmbr0"
-# Pinned, not DHCP — same reasoning as CT 200/300 (see README
-# Troubleshooting notes, DHCP-drift entry). Sits clear of every
-# environment's static range (nodes .101-.103, poly-nodes .110-.112,
-# immich .60, runner .50) and of minio(.100) / vault(.200).
-CT_IP="192.168.100.230/24"
 CT_GATEWAY="192.168.100.1"
 # Pinned, not inherited from the host — bare-pve's own /etc/resolv.conf is
 # Tailscale MagicDNS (100.100.100.100), which only resolves inside the
