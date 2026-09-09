@@ -197,7 +197,8 @@ operator / an AppRole). It reuses the shared paths above via the
 `proxmox/data/*` + `minio/data/*` globs already in `operator-manual-apply`
 — no edit to this repo's policy per downstream repo. Current downstream
 mounts: `oci/` (`oci-proxmox-node`), `k8s-lab/` (`k8s-lab`),
-`relief-landing/` (`relief-landing`), `tailscale/` (`tailscale-acl`).
+`relief-landing/` (`relief-landing`), `tailscale/` (`tailscale-acl`),
+`valheim/` (`valheim-lxc`).
 
 ## Repo layout
 
