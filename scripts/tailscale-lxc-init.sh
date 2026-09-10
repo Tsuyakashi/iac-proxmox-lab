@@ -36,8 +36,8 @@ PVE_NODE="$(hostname -s)"
 # bridge topology) — bare-pve/pve-rog sit on flat home LAN with LVM-thin
 # storage and amd64 templates; oci-pve is an isolated NAT bridge
 # (container_subnet from oci-proxmox-node, see its README) with ZFS
-# storage and arm64 templates (VM.Standard.A1.Flex has no EL2 -> no QEMU,
-# but LXC/templates are unaffected — arm64 userspace runs natively).
+# storage and an arm64 Debian template (VM.Standard.A1.Flex has no EL2 ->
+# no QEMU, but LXC is unaffected — arm64 userspace runs natively).
 # An unlisted node is a hard error: add a case entry before running there.
 case "${PVE_NODE}" in
     bare-pve)
@@ -72,8 +72,12 @@ case "${PVE_NODE}" in
         # the ZFS pool on the second block volume, added via
         # `pvesm add zfspool tank` in bootstrap.sh.tpl.
         STORAGE="tank"
-        # VM.Standard.A1.Flex is Arm — needs an arm64 template, not amd64.
-        TEMPLATE="ubuntu-24.04-standard_24.04-2_arm64.tar.zst"
+        # VM.Standard.A1.Flex is Arm — needs an arm64 template. Proxmox's
+        # appliance catalog (`pveam available`) publishes NO Ubuntu arm64
+        # container template — only Debian 13 and Alpine are built for
+        # arm64. Debian is fine here: step 4 is distro-agnostic (apt-get +
+        # tailscale install.sh both support Debian).
+        TEMPLATE="debian-13-standard_13.6-1_arm64.tar.zst"
         ;;
     *)
         echo "tailscale-lxc-init: no config for node '${PVE_NODE}'." >&2
