@@ -240,7 +240,8 @@ scripts/
 ├── vault-userpass-init.sh            # Vault: operator-manual-apply policy/login (laptop)
 ├── vault-apply-wrapper.sh            # Sourced shell wrapper: auto-fetches secrets for manual apply
 ├── shared-storage-creation.sh        # Proxmox-side (bare-pve): NFS export prep
-└── register-github-runner.sh         # Registers the GitHub Actions runner agent on ci-runner
+├── register-github-runner.sh         # Registers the GitHub Actions runner agent on ci-runner
+└── tailscale-runner-init.sh          # On ci-node: joins the tailnet as tag:ci + /etc/hosts pins (step 8a)
 ```
 
 Full detail on every one of the six manually-applied environments, the
@@ -417,6 +418,40 @@ terraform apply
 Always run this by hand, never from the self-hosted runner's own CI job —
 see [docs/architecture.md#two-independent-root-modules](docs/architecture.md#two-independent-root-modules)
 for the incident that made this a hard rule.
+
+#### 8a. Put ci-node into the tailnet (`tag:ci`)
+
+Some deploy jobs no longer reach their targets over the home LAN — e.g.
+`lombel-landing`'s VM lives on an isolated SDN segment and is only reachable
+over Tailscale. The runner host therefore joins the tailnet as `tag:ci`:
+
+```bash
+{ printf 'export TS_AUTHKEY=%q\n' "$(vault kv get -field=auth-key tailscale/ci-node)"
+  cat scripts/tailscale-runner-init.sh; } | ssh ubuntu@192.168.100.50 'sudo bash -s'
+```
+
+The key goes in over stdin with the script, never on a command line.
+`tailscale/ci-node` holds a single-use, pre-approved auth key tagged `tag:ci`
+(admin console -> Keys). The tag and its grants (`tag:ci` -> `tag:web`
+`tcp:22`, -> `lxc-jump` `tcp:8200`) live in `tailscale-acl`.
+
+- **Every runner on ci-node gets `tag:ci`'s grants** — it's one Tailscale node
+  for the whole VM, not per runner. The per-repo boundary is each repo's own
+  deploy secrets in Vault (AppRole-scoped), not the network. A repo that needs
+  a hard boundary needs its own runner VM with its own tag.
+- `--accept-dns=false`: ci-node is shared, and tailnet DNS overrides local DNS
+  for every job on it. The tailnet names jobs need (`lxc-bare-pve`,
+  `lombel-landing-dev`) are pinned in a managed `/etc/hosts` block from
+  `tailscale ip`. A peer not visible yet is skipped with a warning; re-run the
+  script (no key needed once joined) after it gets tagged / granted, or after
+  a target VM is re-created with a new tailnet IP.
+- A script, not `environments/runner` cloud-init: `modules/proxmox-vm` wires
+  `user_data_file_id` to the snippet resource id, so any cloud-init change
+  re-creates ci-node and every registered runner with it. After a
+  from-scratch `terraform apply` of `environments/runner`, run this together
+  with the runners' register scripts.
+- Not a `ProxyJump` through `lxc-bare-pve`: jobs talk to tailnet targets
+  directly as a tailnet node.
 
 ### 9. (Optional, manual, as-needed) poly-nodes / minecraft-node / immich-node
 
