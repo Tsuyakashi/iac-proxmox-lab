@@ -46,6 +46,15 @@ CT_BRIDGE="vmbr0"
 # other environment's static range (nodes .101-.103, poly-nodes
 # .110-.112, immich .60, runner .50, minio .100).
 CT_IP="192.168.100.200/24"
+# CT 400 (lxc-bare-pve; CT_IP in scripts/tailscale-lxc-init.sh — keep in
+# sync): its `tailscale serve` is the way into Vault from the tailnet. The
+# listener trusts X-Forwarded-For from this address only, so Vault sees the
+# real tailnet client IP instead of the proxy's. lombel-landing binds its
+# AppRole secret_ids/tokens to the landing VM's tailnet IP and its CI JWT
+# role to ci-node's (secret_id_bound_cidrs / token_bound_cidrs) — without
+# these listener lines every request looks like 192.168.100.230 and those
+# logins fail.
+JUMP_IP="192.168.100.230"
 CT_GATEWAY="192.168.100.1"
 # Pinned, not inherited from the host — bare-pve's own /etc/resolv.conf is
 # Tailscale MagicDNS (100.100.100.100), which only resolves inside the
@@ -162,6 +171,9 @@ setcap cap_ipc_lock=+ep /usr/local/bin/vault
 mkdir -p /opt/vault/data /etc/vault.d
 chown -R vault:vault /opt/vault/data /etc/vault.d
 
+# Written ONCE: an existing vault.hcl is never touched by a re-run (a
+# changed listener needs a Vault restart = a manual unseal). To bring an
+# existing CT in line, see README.md, Vault: X-Forwarded-For listener.
 if [ ! -f /etc/vault.d/vault.hcl ]; then
 cat > /etc/vault.d/vault.hcl << 'EOF'
 ui = true
@@ -174,6 +186,18 @@ storage \"raft\" {
 listener \"tcp\" {
   address     = \"0.0.0.0:8200\"
   tls_disable = true
+
+  # Real client IP from tailscale serve on lxc-bare-pve (CT 400). XFF trusted
+  # only from it; hop_skips = 0: tailscale serve SETS X-Forwarded-For to the
+  # tailnet client's address, so its (last) entry is the one to take and a
+  # client-sent XFF can't spoof it. reject_not_authorized = false: an XFF
+  # from anyone else is ignored (the socket address counts), not an error;
+  # reject_not_present = false: LAN / 127.0.0.1 clients without XFF keep
+  # working (pct exec, scripts with VAULT_ADDR=http://${CT_IP%/*}:8200).
+  x_forwarded_for_authorized_addrs      = \"${JUMP_IP}/32\"
+  x_forwarded_for_hop_skips             = 0
+  x_forwarded_for_reject_not_authorized = false
+  x_forwarded_for_reject_not_present    = false
 }
 
 # Single-node raft — this IS its own cluster/api address.

@@ -329,6 +329,79 @@ pct exec 300 -- env VAULT_ADDR=http://127.0.0.1:8200 vault operator unseal   # x
 Vault comes back **sealed** after every CT/host restart — repeat the
 `operator unseal` step manually each time.
 
+#### Vault: X-Forwarded-For listener (real client IPs)
+
+Tailnet clients reach Vault through `tailscale serve` on CT 400
+(`lxc-bare-pve`, `192.168.100.230`), so on the socket every request comes
+from the proxy. The listener in `/etc/vault.d/vault.hcl` trusts
+`X-Forwarded-For` from that one address (`x_forwarded_for_authorized_addrs =
+192.168.100.230/32`, `hop_skips = 0`, `reject_not_authorized = false`,
+`reject_not_present = false`; the why is next to it in
+`scripts/vault-lxc-init.sh`). Vault then sees — and the audit log records — the
+real tailnet address. `lombel-landing` depends on it: its app AppRole binds
+secret_ids and tokens to the landing VM's tailnet IP, its CI JWT role to
+`ci-node`'s. **A CT 300 without these lines = the landing VM's agents and
+that CI can't log in.**
+
+`vault-lxc-init.sh` writes `vault.hcl` only if it doesn't exist, so a re-run
+never touches a live CT. On the current CT 300 the lines were added by hand
+(2026-09-25) and match the script; a re-created CT gets them from the script.
+
+Check that a CT matches (read-only):
+
+```bash
+pct exec 300 -- grep -E 'x_forwarded_for_' /etc/vault.d/vault.hcl
+# x_forwarded_for_authorized_addrs      = "192.168.100.230/32"
+# x_forwarded_for_hop_skips             = 0
+# x_forwarded_for_reject_not_authorized = false
+# x_forwarded_for_reject_not_present    = false
+```
+
+Bring an existing CT in line if they are missing (a listener change needs a
+Vault restart, i.e. **unseal x3** afterwards):
+
+```bash
+pct exec 300 -- cp -a /etc/vault.d/vault.hcl /etc/vault.d/vault.hcl.bak
+pct exec 300 -- sed -i '/^  tls_disable = true$/a\
+  x_forwarded_for_authorized_addrs      = "192.168.100.230/32"\
+  x_forwarded_for_hop_skips             = 0\
+  x_forwarded_for_reject_not_authorized = false\
+  x_forwarded_for_reject_not_present    = false' /etc/vault.d/vault.hcl
+pct exec 300 -- grep -c 'x_forwarded_for_' /etc/vault.d/vault.hcl      # 4
+pct exec 300 -- systemctl restart vault
+pct exec 300 -- env VAULT_ADDR=http://127.0.0.1:8200 vault operator unseal   # x3
+```
+
+Verify:
+
+```bash
+# 1. the audit log shows tailnet addresses (ci-node 100.70.240.34, landing VM
+#    100.117.51.111, your laptop), not 192.168.100.230, for requests after the change
+pct exec 300 -- tail -n 2000 /var/log/vault/audit.log | grep -o '"remote_address":"[^"]*"' | sort | uniq -c
+# 2. a client can't spoof it: from the laptop, through the proxy, with a forged header —
+#    the audit entry still has the laptop's tailnet IP, not 203.0.113.9
+curl -s -o /dev/null -H "X-Vault-Token: $(vault print token)" -H 'X-Forwarded-For: 203.0.113.9' \
+  https://lxc-bare-pve.tail65829d.ts.net:8200/v1/auth/token/lookup-self
+pct exec 300 -- tail -n 20 /var/log/vault/audit.log | grep -o '"remote_address":"[^"]*"' | tail -n 1
+# 3. lombel-landing: agents on the landing VM and its CI log in as before —
+#    lombel-landing tf/README.md, «Vault без ротации: раскатка», checks after phase 1
+```
+
+Rollback: restore `vault.hcl.bak`, restart, unseal x3. Note that it breaks the
+CIDR-bound logins above until those roles drop their CIDRs.
+
+**Not yet: closing 8200 to the LAN.** The listener is plain HTTP on
+`0.0.0.0:8200`. A Proxmox firewall on CT 300 allowing 8200 only from
+`192.168.100.230` (and 8201 from nobody) is the next step, but not before
+everything that still talks to `http://192.168.100.200:8200` directly moves
+to `https://lxc-bare-pve.tail65829d.ts.net:8200`:
+`relief-landing`'s deploy job (self-hosted on `ci-node`, hardcoded in its
+`pipeline.yml`) and the `VAULT_ADDR` defaults of the apply wrappers /
+init scripts in this repo, `tailscale-acl`, `relief-landing`,
+`proxmox-hosted-workstation`, `tools-sandbox`, `k8s-lab`, `oci-proxmox-node`,
+`valheim-lxc`'s README. The audit log (since 2026-09-25) shows no direct LAN
+client, but `relief-landing` last deployed before it existed.
+
 Then wire up both auth paths and seed the SSH key every environment
 injects via cloud-init:
 
