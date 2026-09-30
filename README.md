@@ -558,6 +558,53 @@ The key goes in over stdin with the script, never on a command line.
 - Not a `ProxyJump` through `lxc-bare-pve`: jobs talk to tailnet targets
   directly as a tailnet node.
 
+#### 8b. ci-node: расширить диск
+
+Размер системного диска задаётся полем `disk_size` в `nodes` (`environments/runner/variables.tf`).
+Сейчас 20 GB, было 10: на `/` оставалось 1,6 GB из 8,7. **Только рост.**
+
+- bpg/proxmox (0.111.1 из lock) меняет размер in-place: `size` не `ForceNew`.
+- Рост — это вызов `ResizeVMDisk` (= `qm resize`) на работающей VM, без пересоздания и перезагрузки.
+- Уменьшение провайдер отвергает («Cannot shrink … not supported»).
+- Раздел и ФС в госте Terraform не трогает — это шаг 3.
+
+```bash
+# 0. место в thin-pool bare-pve (local-lvm): свободно > 10 GB
+ssh root@192.168.100.30 'pvesm status --storage local-lvm'
+
+# 1. plan — из основного клона после мержа PR (vault-apply-wrapper.sh подключён)
+cd ~/iac-proxmox-lab && git switch main && git pull
+#    если pull отказывается («would be overwritten») из-за environments/runner/{backend,locals}.tf —
+#    tailnet-адреса уже в main; при пустом diff локальную копию можно отбросить:
+#    git diff origin/main -- environments/runner/backend.tf environments/runner/locals.tf
+#    git checkout -- environments/runner/backend.tf environments/runner/locals.tf && git pull
+cd environments/runner && terraform plan
+#    ожидается РОВНО одно:
+#      # module.ci_runner["ci-node"].proxmox_virtual_environment_vm.this will be updated in-place
+#        ~ disk { ~ size = 10 -> 20 ... }
+#      Plan: 0 to add, 1 to change, 0 to destroy.
+#    Любое «must be replaced», «destroy», изменение cloud-init-сниппета
+#    (proxmox_virtual_environment_file — он пересоздаёт ci-node, см. 8a)
+#    или другого атрибута VM — СТОП, не применять.
+
+# 2. apply — тот же plan, подтвердить yes
+terraform apply
+
+# 3. на ci-node: раздел и ext4 онлайн, без перезагрузки
+ssh ubuntu@100.70.240.34 'lsblk /dev/sda'          # sda 20G; если всё ещё 10G:
+#   ssh ubuntu@100.70.240.34 'echo 1 | sudo tee /sys/class/block/sda/device/rescan'
+ssh ubuntu@100.70.240.34 'sudo growpart /dev/sda 1 && sudo resize2fs /dev/sda1 && df -h /'
+
+# 4. проверка
+ssh ubuntu@100.70.240.34 'df -h /; systemctl --no-pager status "actions.runner.*" | grep -E "^●|Active:";
+  systemctl --no-pager status lombel-monitor.timer | grep -E "^●|Active:|Trigger:"'
+#    / ≈ 20G (Size ~19G); раннеры active (running); таймер active (waiting), Trigger через ≤5 мин.
+#    Раннеры в GitHub (Settings → Actions → Runners) — Idle.
+```
+
+- `sda1` — последний раздел диска, ext4 (проверено `lsblk`), поэтому `growpart` просто продлевает его. При другой раскладке шаг 3 вслепую не выполнять.
+- С ноутбука вне домашней LAN адреса `192.168.100.x` недоступны: шаг 0 — через `https://lxc-bare-pve.tail65829d.ts.net:8006` (UI → bare-pve → local-lvm), а plan/apply — с tailnet-адресами в `environments/runner` (см. «Доступ к state и API: tailnet или LAN»).
+
 ### 9. (Optional, manual, as-needed) poly-nodes / minecraft-node / immich-node
 
 Same pattern as steps 7/8 — `cd` into the environment, `terraform init`,

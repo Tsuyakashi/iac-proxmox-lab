@@ -15,6 +15,7 @@ module "ci_runner" {
   tags           = [each.value.tag_name]
   cores          = each.value.cores
   memory         = each.value.memory
+  disk_size      = each.value.disk_size
   mac_address    = each.value.mac
 
   ip_config = {

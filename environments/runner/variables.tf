@@ -32,8 +32,13 @@ variable "nodes" {
     cores    = number
     mac      = string
     ip       = string # CIDR, e.g. "192.168.100.21/24"
+    # Системный диск, GB. Только рост: провайдер (bpg/proxmox) делает
+    # увеличение in-place (qm resize, без пересоздания и перезагрузки VM),
+    # уменьшение отвергает ("Cannot shrink"). ФС внутри гостя растить
+    # руками — README, «ci-node: расширить диск».
+    disk_size = optional(number, 10)
   }))
   default = {
-    "ci-node" = { tag_name = "ci", memory = 2028, cores = 2, mac = "BC:24:11:13:83:51", ip = "192.168.100.50/24" }
+    "ci-node" = { tag_name = "ci", memory = 2028, cores = 2, mac = "BC:24:11:13:83:51", ip = "192.168.100.50/24", disk_size = 20 }
   }
 }
