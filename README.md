@@ -542,6 +542,10 @@ ssh root@192.168.100.30 'pvesm status --storage local-lvm'
 
 # 1. plan — из основного клона после мержа PR (vault-apply-wrapper.sh подключён)
 cd ~/iac-proxmox-lab && git switch main && git pull
+#    если pull отказывается («would be overwritten») из-за environments/runner/{backend,locals}.tf —
+#    tailnet-адреса уже в main; при пустом diff локальную копию можно отбросить:
+#    git diff origin/main -- environments/runner/backend.tf environments/runner/locals.tf
+#    git checkout -- environments/runner/backend.tf environments/runner/locals.tf && git pull
 cd environments/runner && terraform plan
 #    ожидается РОВНО одно:
 #      # module.ci_runner["ci-node"].proxmox_virtual_environment_vm.this will be updated in-place
