@@ -6,7 +6,7 @@
 locals {
   proxmox_nodes = {
     "bare-pve" = {
-      endpoint       = "https://192.168.100.30:8006/"
+      endpoint       = "https://lxc-bare-pve.tail65829d.ts.net:8006/"
       template_vm_id = 9000
     }
     "pve-rog" = {
