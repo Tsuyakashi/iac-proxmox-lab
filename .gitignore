@@ -4,3 +4,7 @@ terraform.tfvars
 .terraform/
 crash.log
 inventory.ini
+# local-only address overrides (README, «Доступ к state и API: tailnet или LAN»)
+*_override.tf
+override.tf
+*.tfbackend

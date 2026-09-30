@@ -492,6 +492,38 @@ Always run this by hand, never from the self-hosted runner's own CI job —
 see [docs/architecture.md#two-independent-root-modules](docs/architecture.md#two-independent-root-modules)
 for the incident that made this a hard rule.
 
+#### Доступ к state и API: tailnet или LAN
+
+`environments/runner` ходит по **tailnet**: оба адреса — `tailscale serve` на
+`lxc-bare-pve` (шаг 10), поэтому применять можно с любой машины в tailnet, не
+только из домашней LAN:
+
+| Что | tailnet (в репо) | LAN (за ним стоит) |
+| --- | --- | --- |
+| state (MinIO S3), `backend.tf` | `https://lxc-bare-pve.tail65829d.ts.net:9000` | `http://192.168.100.100:9000` |
+| API Proxmox `bare-pve`, `locals.tf` | `https://lxc-bare-pve.tail65829d.ts.net:8006/` | `https://192.168.100.30:8006/` |
+
+- `pve-rog` остаётся по LAN (`192.168.100.20`): через `lxc-bare-pve` проброшен только API `bare-pve`. Runner живёт на `bare-pve`.
+- `vault-apply-wrapper.sh` ходит в Vault по своему `VAULT_ADDR`, это отдельная настройка.
+- Остальные `environments/*` пока на LAN-адресах.
+
+**Машина в домашней LAN, без tailnet** — те же LAN-адреса, без правки файлов в git.
+Оба файла ниже в `.gitignore`:
+
+```bash
+cd environments/runner/
+printf 'endpoints = { s3 = "http://192.168.100.100:9000" }\n' > lan.s3.tfbackend
+printf 'locals {\n  proxmox_endpoint = "https://192.168.100.30:8006/"\n}\n' > lan_override.tf
+terraform init -reconfigure -backend-config=lan.s3.tfbackend
+terraform plan
+```
+
+- `-backend-config` из файла перекрывает `endpoints` из `backend.tf`.
+- `*_override.tf` перекрывает `local.proxmox_endpoint` (Terraform override files); оба приёма проверены.
+- State тот же (бакет и ключ не меняются), поэтому `-reconfigure`, а не `-migrate-state`.
+- Обратно на tailnet: удалить оба файла и снова `terraform init -reconfigure`.
+- Та же `-reconfigure` нужна один раз в клоне, который инициализировался ещё с LAN-адресом в `backend.tf`.
+
 #### 8a. Put ci-node into the tailnet (`tag:ci`)
 
 Some deploy jobs no longer reach their targets over the home LAN — e.g.
