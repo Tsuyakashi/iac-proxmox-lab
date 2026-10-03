@@ -40,6 +40,14 @@ PVE_NODE="$(hostname -s)"
 # no QEMU, but LXC is unaffected — arm64 userspace runs natively).
 # An unlisted node is a hard error: add a case entry before running there.
 case "${PVE_NODE}" in
+    pve-rog)
+        CTID=420
+        CT_IP="192.168.100.220/24"
+        CT_GATEWAY="192.168.100.1"
+        CT_NAMESERVERS="192.168.100.1 8.8.8.8"
+        STORAGE="local-lvm"
+        TEMPLATE="ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+        ;;
     bare-pve)
         CTID=430
         CT_IP="192.168.100.230/24"
@@ -50,9 +58,9 @@ case "${PVE_NODE}" in
         STORAGE="local-lvm"
         TEMPLATE="ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
         ;;
-    pve-rog)
-        CTID=420
-        CT_IP="192.168.100.220/24"
+    amd-pve)
+        CTID=440
+        CT_IP="192.168.100.240/24"
         CT_GATEWAY="192.168.100.1"
         CT_NAMESERVERS="192.168.100.1 8.8.8.8"
         STORAGE="local-lvm"
