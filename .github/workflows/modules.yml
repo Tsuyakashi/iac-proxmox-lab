@@ -1,0 +1,44 @@
+# Static checks only. Nothing here applies anything: a module change must
+# never trigger an apply of a live environment.
+name: modules
+
+on:
+  pull_request:
+    paths: ["modules/**", "examples/**", ".github/workflows/modules.yml"]
+  push:
+    branches: [main]
+    paths: ["modules/**", "examples/**", ".github/workflows/modules.yml"]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.16"
+
+      - name: fmt
+        run: terraform fmt -check -recursive -diff
+
+      - name: validate
+        run: |
+          fail=0
+          for d in modules/*/ examples/*/; do
+            echo "::group::$d"
+            if ! (cd "$d" && terraform init -backend=false -input=false >/dev/null && terraform validate); then
+              echo "::error::validate failed: $d"; fail=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $fail
+
+      - name: plan examples (no API)
+        env:
+          TF_VAR_proxmox_api_token: "terraform@pve!ci=00000000-0000-0000-0000-000000000000"
+        run: |
+          for d in examples/*/; do
+            (cd "$d" && terraform plan -refresh=false -input=false -no-color -lock=false >/dev/null) \
+              || { echo "::error::plan failed: $d"; exit 1; }
+          done
