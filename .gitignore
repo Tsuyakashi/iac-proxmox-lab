@@ -1,10 +1,12 @@
-terraform.tfvars
+.terraform/
+# lock files are committed for environments/*, not for the library
+modules/**/.terraform.lock.hcl
+examples/**/.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
-.terraform/
-crash.log
-inventory.ini
-# local-only address overrides (README, «Доступ к state и API: tailnet или LAN»)
+*.tfplan
+*.tfvars
+*.tfbackend
 *_override.tf
 override.tf
-*.tfbackend
+crash*.log
