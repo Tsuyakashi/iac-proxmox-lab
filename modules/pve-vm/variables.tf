@@ -170,3 +170,34 @@ variable "vga_type" {
   type        = string
   default     = null
 }
+
+variable "extra_disks" {
+  description = <<-EOT
+    Data disks besides the boot disk, created empty. Grow one by raising
+    size (in place); never shrink. interface must be unique and differ from
+    disk.interface (e.g. sata1, scsi1, virtio1).
+  EOT
+  type = list(object({
+    interface    = string
+    size         = number
+    datastore_id = optional(string, "local-lvm")
+    file_format  = optional(string)
+    ssd          = optional(bool, false)
+    backup       = optional(bool, true)
+  }))
+  default = []
+
+  validation {
+    condition = (
+      length(distinct([for d in var.extra_disks : d.interface])) == length(var.extra_disks) &&
+      !contains([for d in var.extra_disks : d.interface], var.disk.interface)
+    )
+    error_message = "extra_disks interfaces must be unique and differ from disk.interface."
+  }
+}
+
+variable "protection" {
+  description = "Proxmox protection flag: the VM and its disks cannot be removed (incl. terraform destroy) until it is cleared."
+  type        = bool
+  default     = false
+}

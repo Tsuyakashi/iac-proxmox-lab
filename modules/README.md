@@ -21,7 +21,7 @@ module "sandbox" {
 | `sdn` | Simple-зона на одной ноде, любое число vnet; vnet с `subnet` маршрутизируется (шлюз, опционально SNAT), без него — чистый L2 | zone, vnet, subnet, applier ×2 |
 | `pve-image` | cloud-образ, который нода качает сама в `import` | `proxmox_download_file` |
 | `cloud-init` | vendor-data сниппет: guest agent, Docker (+ rootless), свои пакеты, файлы, команды | `proxmox_virtual_environment_file` (**SSH**) |
-| `pve-vm` | одна VM: cloud-образ + cloud-init **или** ISO без cloud-init; несколько NIC; PCI по маппингам; USB | VM |
+| `pve-vm` | одна VM: cloud-образ + cloud-init **или** ISO без cloud-init; несколько NIC; доп. диски (`extra_disks`); PCI по маппингам; USB; флаг `protection` | VM |
 | `pve-ct` | один LXC: unprivileged или privileged, только то, что может токен | CT |
 | `guest-firewall` | файрвол VM/CT: IN DROP, SSH от шлюза, разрешённые сети, OUT DROP в частные диапазоны и tailnet | options, rules |
 | `isolated-vm` | композит под самый частый случай: свой SNAT-сегмент + образ + сниппет + VM + файрвол | всё выше |

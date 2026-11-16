@@ -27,6 +27,7 @@ resource "proxmox_virtual_environment_vm" "this" {
   description = var.description
   tags        = sort(distinct(concat(["terraform"], var.tags)))
   on_boot     = var.on_boot
+  protection  = var.protection
   started     = var.started
 
   machine       = "q35"
@@ -73,6 +74,22 @@ resource "proxmox_virtual_environment_vm" "this" {
     file_format  = var.disk.file_format
     iothread     = startswith(var.disk.interface, "virtio") || startswith(var.disk.interface, "scsi")
     discard      = "on"
+  }
+
+  # Data disks next to the boot disk (empty, not imported). Order is not
+  # significant: the provider keys them by interface.
+  dynamic "disk" {
+    for_each = var.extra_disks
+    content {
+      datastore_id = disk.value.datastore_id
+      interface    = disk.value.interface
+      size         = disk.value.size
+      file_format  = disk.value.file_format
+      ssd          = disk.value.ssd
+      backup       = disk.value.backup
+      iothread     = startswith(disk.value.interface, "virtio") || startswith(disk.value.interface, "scsi")
+      discard      = "on"
+    }
   }
 
   dynamic "cdrom" {
