@@ -1,219 +1,140 @@
 #!/bin/bash
 #
-# scripts/vault-lxc-init.sh
+# Tier-0 secrets: Vault in an unprivileged LXC, integrated (raft) storage.
 #
-# Run on the Proxmox host (ssh root@<proxmox-ip> 'bash -s' < scripts/vault-lxc-init.sh).
-# Creates an unprivileged LXC container and runs Vault inside it as a systemd
-# service (no Docker), raft (integrated) storage — no external Consul needed
-# for a single-node deploy. Deliberately NOT managed by Terraform, same
-# reasoning as scripts/minio-lxc-init.sh: the only non-declarative parts
-# (user creation, binary install, setcap, systemd unit) would need
-# null_resource + local-exec either way, so there's nothing to gain from
-# wrapping the CT "hardware" in the provider and everything to lose by
-# coupling secrets storage to a Terraform state lifecycle.
+#   ssh bare-pve 'bash -s' < scripts/vault-lxc-init.sh
+#   ssh bare-pve 'VAULT_VERSION=2.1.0 bash -s' < scripts/vault-lxc-init.sh
 #
-# TLS is intentionally disabled (tls_disable = true) — same class of
-# trade-off as the plaintext terraform-token.json noted in the root
-# README (acceptable for a local lab behind no public exposure, not
-# something to carry into anything internet-facing). Put this behind
-# Tailscale/LAN-only ACLs, not behind "the traffic is encrypted".
+# Not managed by Terraform: Terraform reads its secrets from here.
+# Idempotent: re-running upgrades the binary on a version change and never
+# touches vault.hcl or the data dir once they exist.
 #
-# mlock: Vault normally mlock()s its memory so secrets can't get swapped
-# to disk in plaintext. Handled here via `setcap cap_ipc_lock=+ep` on the
-# binary (works fine in an unprivileged LXC, no container-level privilege
-# needed) rather than `disable_mlock = true` — keeps the protection live
-# regardless of whether swap ever gets enabled on the host later.
+# Reached over the tailnet as svc:vault (https://vault.<tailnet>.ts.net),
+# served by lxc-bare-pve (CT 430). TLS ends at Tailscale; the LAN listener is
+# plain HTTP and must stay LAN-only.
 #
-# Unseal: NOT automated here on purpose. Raft storage survives a CT
-# restart fine, but Vault comes back sealed after every process start
-# (Shamir key shares, no external KMS available in this lab for
-# auto-unseal) — that's a deliberate manual step every time, not a bug in
-# this script. Root token / unseal keys are printed ONCE on first init
-# and never again — copy them out before closing the terminal.
+# Binary: releases.hashicorp.com is unreachable from BY addresses, so the
+# zip comes from the Yandex Cloud mirror of HashiCorp releases and is
+# checked against the mirror's SHA256SUMS. Override with VAULT_BASE_URL.
 #
-# Idempotent — safe to re-run.
+# Unseal is manual on purpose (Shamir, no KMS in the lab): Vault comes back
+# sealed after every restart of the CT or the node.
 
-set -e
+set -euo pipefail
 
-CTID=300
+CTID="${CTID:-300}"
 CT_HOSTNAME="vault"
 CT_MEMORY=1024
 CT_CORES=1
 CT_DISK_GB=8
 CT_BRIDGE="vmbr0"
-# Pinned, not DHCP — same reasoning as CT 200/MinIO (see README
-# Troubleshooting notes, DHCP-drift entry). Pick an address outside every
-# other environment's static range (nodes .101-.103, poly-nodes
-# .110-.112, immich .60, runner .50, minio .100).
-CT_IP="192.168.100.200/24"
-# CT 400 (lxc-bare-pve; CT_IP in scripts/tailscale-lxc-init.sh — keep in
-# sync): its `tailscale serve` is the way into Vault from the tailnet. The
-# listener trusts X-Forwarded-For from this address only, so Vault sees the
-# real tailnet client IP instead of the proxy's. lombel-landing binds its
-# AppRole secret_ids/tokens to the landing VM's tailnet IP and its CI JWT
-# role to ci-node's (secret_id_bound_cidrs / token_bound_cidrs) — without
-# these listener lines every request looks like 192.168.100.230 and those
-# logins fail.
-JUMP_IP="192.168.100.230"
+CT_IP="${CT_IP:-192.168.100.200/24}"
 CT_GATEWAY="192.168.100.1"
-# Pinned, not inherited from the host — bare-pve's own /etc/resolv.conf is
-# Tailscale MagicDNS (100.100.100.100), which only resolves inside the
-# host's netns (tailscaled intercepts it via host-only iptables rules).
-# A freshly-created LXC copies that resolv.conf verbatim but has no such
-# interception in its own netns, so 100.100.100.100 is a dead address
-# inside the container -> apt-get et al hang/fail with DNS resolution
-# errors even though routing/NAT is fine. Same issue hit CT 201 on first
-# run; see README Troubleshooting notes.
-CT_NAMESERVERS="192.168.100.1 8.8.8.8"
+# Never inherit the node's resolv.conf: it is MagicDNS, dead inside the CT.
+CT_NAMESERVERS="192.168.100.1 1.1.1.1"
 STORAGE="local-lvm"
 TEMPLATE_STORAGE="local"
-TEMPLATE="ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+TEMPLATE_PATTERN="ubuntu-26.04-standard_"
 
-VAULT_VERSION="2.1.0"
-# Internal mirror on CT 200 (minio), bucket made anonymously-downloadable
-# via 'mc anonymous set download local/tools'. Plain binary (not a .zip),
-# uploaded manually — avoids depending on releases.hashicorp.com's uptime
-# and, more importantly, on the CT having a working CA store for HTTPS
-# (see ca-certificates note below — kept as a general LXC hygiene default
-# even though this particular fetch is now plain HTTP against a LAN host).
-MINIO_ENDPOINT="http://192.168.100.100:9000"
-VAULT_BINARY_URL="${MINIO_ENDPOINT}/tools/vault_${VAULT_VERSION}_linux_amd64"
+# lxc-bare-pve (CT 430): its `tailscale serve --service=svc:vault` is the
+# only way in from the tailnet. XFF is trusted from it alone, so Vault sees
+# the real tailnet client (AppRole/token *_bound_cidrs depend on that).
+PROXY_IP="${PROXY_IP:-192.168.100.230}"
+PUBLIC_URL="${PUBLIC_URL:-https://vault.tail65829d.ts.net}"
+
+VAULT_VERSION="${VAULT_VERSION:-2.1.0}"
+VAULT_BASE_URL="${VAULT_BASE_URL:-https://hashicorp-releases.yandexcloud.net/vault}"
+
+export LC_ALL=C LANG=C
+
+# 0. Fail fast if the mirror has no such version (from the node, like the CT).
+curl -fsSI --max-time 20 "${VAULT_BASE_URL}/${VAULT_VERSION}/vault_${VAULT_VERSION}_SHA256SUMS" >/dev/null \
+  || { echo "no vault ${VAULT_VERSION} at ${VAULT_BASE_URL} (from $(hostname))"; exit 1; }
 
 # 1. Template
-if ! pveam list "${TEMPLATE_STORAGE}" | grep -q "${TEMPLATE}"; then
-    pveam update
-    pveam download "${TEMPLATE_STORAGE}" "${TEMPLATE}"
-fi
+pveam update >/dev/null
+TEMPLATE="$(pveam available --section system | awk '{print $2}' | grep "^${TEMPLATE_PATTERN}" | sort -V | tail -1)"
+[ -n "${TEMPLATE}" ] || { echo "no ${TEMPLATE_PATTERN}* template in pveam index"; exit 1; }
+pveam list "${TEMPLATE_STORAGE}" | grep -q "${TEMPLATE}" || pveam download "${TEMPLATE_STORAGE}" "${TEMPLATE}"
 
-# 2. Container
+# 2. Container. No swap: with raft, Vault runs with disable_mlock (HashiCorp's
+# recommendation for integrated storage), so the CT must not swap instead.
 if ! pct status "${CTID}" &>/dev/null; then
-    pct create "${CTID}" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
-        --hostname "${CT_HOSTNAME}" \
-        --memory "${CT_MEMORY}" \
-        --cores "${CT_CORES}" \
-        --rootfs "${STORAGE}:${CT_DISK_GB}" \
-        --net0 "name=eth0,bridge=${CT_BRIDGE},ip=${CT_IP},gw=${CT_GATEWAY}" \
-        --nameserver "${CT_NAMESERVERS}" \
-        --unprivileged 1 \
-        --features "nesting=1" \
-        --onboot 1
-else
-    # idempotent guard: CT already exists — make sure net0 is still
-    # pinned to CT_IP, not left on a stale config from before this
-    # value ever changed (same pattern as minio-lxc-init.sh).
-    CURRENT_NET0=$(pct config "${CTID}" | awk '/^net0:/{print}')
-    if ! echo "${CURRENT_NET0}" | grep -q "ip=${CT_IP}"; then
-        echo "net0 not pinned to ${CT_IP}, updating (CT will restart to apply)..."
-        pct set "${CTID}" --net0 "name=eth0,bridge=${CT_BRIDGE},ip=${CT_IP},gw=${CT_GATEWAY}"
-        pct reboot "${CTID}" 2>/dev/null || true
-        sleep 5
-    fi
-
-    # idempotent guard: same story for nameserver — CT may have inherited
-    # the host's Tailscale MagicDNS resolv.conf at creation time (as CT
-    # 201 did), or the host may join/leave tailscale between runs.
-    CURRENT_NS=$(pct config "${CTID}" | awk '/^nameserver:/{print}')
-    if ! echo "${CURRENT_NS}" | grep -q "192.168.100.1"; then
-        echo "nameserver not pinned to ${CT_NAMESERVERS}, updating (CT will restart to apply)..."
-        pct set "${CTID}" --nameserver "${CT_NAMESERVERS}"
-        pct reboot "${CTID}" 2>/dev/null || true
-        sleep 5
-    fi
+  pct create "${CTID}" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
+    --hostname "${CT_HOSTNAME}" \
+    --memory "${CT_MEMORY}" --swap 0 --cores "${CT_CORES}" \
+    --rootfs "${STORAGE}:${CT_DISK_GB}" \
+    --net0 "name=eth0,bridge=${CT_BRIDGE},ip=${CT_IP},gw=${CT_GATEWAY}" \
+    --nameserver "${CT_NAMESERVERS}" \
+    --unprivileged 1 --features nesting=1 \
+    --onboot 1 --startup order=2 \
+    --tags "tier0"
 fi
+[ "$(pct status "${CTID}" | awk '{print $2}')" = running ] || { pct start "${CTID}"; sleep 5; }
 
-# Idempotent guard: ensure the host kernel allows unprivileged memlock 
-# for Vault's mlock() calls. Without this, even with setcap inside the CT, 
-# Vault might fail with "Failed to lock memory: Cannot allocate memory".
-CONF_FILE="/etc/pve/lxc/${CTID}.conf"
-if ! grep -q "lxc.prlimit.memlock" "$CONF_FILE"; then
-    echo "memlock limit not configured on the host, pinning to unlimited..."
-    echo "lxc.prlimit.memlock: unlimited" >> "$CONF_FILE"
-    
-    # If the container is already up, it needs a reboot to inherit the 
-    # new resource limits from the host netns/cgroups.
-    if [ "$(pct status "${CTID}" | awk '{print $2}')" == "running" ]; then
-        echo "memlock limit updated, rebooting CT to apply host resource limits..."
-        pct reboot "${CTID}" 2>/dev/null || true
-        sleep 5
-    fi
+# 3. Vault inside the CT
+pct exec "${CTID}" -- env \
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  LC_ALL=C VAULT_VERSION="${VAULT_VERSION}" VAULT_BASE_URL="${VAULT_BASE_URL}" \
+  CT_ADDR="${CT_IP%/*}" PROXY_IP="${PROXY_IP}" PUBLIC_URL="${PUBLIC_URL}" \
+  bash -euo pipefail -c '
+export DEBIAN_FRONTEND=noninteractive
+command -v unzip >/dev/null || { apt-get update -qq; apt-get install -y -qq curl unzip ca-certificates; }
+
+id vault &>/dev/null || useradd --system --home-dir /etc/vault.d --shell /usr/sbin/nologin vault
+install -d -o vault -g vault -m 0750 /etc/vault.d /opt/vault /opt/vault/data
+
+# Binary: install only on version change, verified against SHA256SUMS.
+if [ "$(/usr/local/bin/vault version 2>/dev/null | awk "{print \$2}")" != "v${VAULT_VERSION}" ]; then
+  tmp=$(mktemp -d); cd "$tmp"
+  zip="vault_${VAULT_VERSION}_linux_amd64.zip"
+  curl -fsSL --retry 3 -O "${VAULT_BASE_URL}/${VAULT_VERSION}/${zip}"
+  curl -fsSL --retry 3 -O "${VAULT_BASE_URL}/${VAULT_VERSION}/vault_${VAULT_VERSION}_SHA256SUMS"
+  grep " ${zip}\$" "vault_${VAULT_VERSION}_SHA256SUMS" | sha256sum -c -
+  unzip -o -q "$zip" vault
+  install -m 0755 vault /usr/local/bin/vault
+  cd /; rm -rf "$tmp"
+  [ -f /etc/vault.d/vault.hcl ] && systemctl restart vault 2>/dev/null || true
 fi
+/usr/local/bin/vault version
 
-if [ "$(pct status "${CTID}" | awk '{print $2}')" != "running" ]; then
-    pct start "${CTID}"
-    sleep 5
-fi
-
-# 3. Vault install + systemd service (idempotent — checks inside container)
-pct exec "${CTID}" -- bash -c "
-set -e
-
-if ! id vault &>/dev/null; then
-    useradd -r vault -s /sbin/nologin -m -d /etc/vault.d
-fi
-
-if [ ! -f /usr/local/bin/vault ]; then
-    apt-get update -qq
-    # ca-certificates is NOT in the minimal Ubuntu LXC template — without it
-    # wget's HTTPS cert verification against releases.hashicorp.com fails,
-    # and under 'set -e' + 'wget -q' that failure is silent: the script just
-    # stops here with no vault binary, no service, no error text in the log.
-    apt-get install -y -qq wget libcap2-bin
-    wget -q '${VAULT_BINARY_URL}' -O /usr/local/bin/vault
-    chmod +x /usr/local/bin/vault
-fi
-
-# mlock via capability on the binary, not disable_mlock in config — see
-# header note above. Idempotent by nature (re-running setcap is a no-op),
-# so no guard needed, just re-apply on every pass in case the binary was
-# just (re)installed above.
-setcap cap_ipc_lock=+ep /usr/local/bin/vault
-
-mkdir -p /opt/vault/data /etc/vault.d
-chown -R vault:vault /opt/vault/data /etc/vault.d
-
-# Written ONCE: an existing vault.hcl is never touched by a re-run (a
-# changed listener needs a Vault restart = a manual unseal). To bring an
-# existing CT in line, see README.md, Vault: X-Forwarded-For listener.
+# Written once: a changed listener means a restart and a manual unseal.
 if [ ! -f /etc/vault.d/vault.hcl ]; then
-cat > /etc/vault.d/vault.hcl << 'EOF'
+cat > /etc/vault.d/vault.hcl <<EOF
 ui = true
 
-storage \"raft\" {
-  path    = \"/opt/vault/data\"
-  node_id = \"vault-300\"
+storage "raft" {
+  path    = "/opt/vault/data"
+  node_id = "vault-300"
 }
 
-listener \"tcp\" {
-  address     = \"0.0.0.0:8200\"
+listener "tcp" {
+  address     = "0.0.0.0:8200"
   tls_disable = true
 
-  # Real client IP from tailscale serve on lxc-bare-pve (CT 400). XFF trusted
-  # only from it; hop_skips = 0: tailscale serve SETS X-Forwarded-For to the
-  # tailnet client's address, so its (last) entry is the one to take and a
-  # client-sent XFF can't spoof it. reject_not_authorized = false: an XFF
-  # from anyone else is ignored (the socket address counts), not an error;
-  # reject_not_present = false: LAN / 127.0.0.1 clients without XFF keep
-  # working (pct exec, scripts with VAULT_ADDR=http://${CT_IP%/*}:8200).
-  x_forwarded_for_authorized_addrs      = \"${JUMP_IP}/32\"
+  # Real client IP from tailscale serve on lxc-bare-pve. hop_skips = 0:
+  # serve sets X-Forwarded-For itself, so a client-sent XFF cannot spoof it.
+  # XFF from anyone else is ignored (socket address counts), and LAN or
+  # 127.0.0.1 clients without XFF keep working.
+  x_forwarded_for_authorized_addrs      = "${PROXY_IP}/32"
   x_forwarded_for_hop_skips             = 0
   x_forwarded_for_reject_not_authorized = false
   x_forwarded_for_reject_not_present    = false
 }
 
-# Single-node raft — this IS its own cluster/api address.
-api_addr     = \"http://${CT_IP%/*}:8200\"
-cluster_addr = \"http://${CT_IP%/*}:8201\"
+api_addr     = "${PUBLIC_URL}"
+cluster_addr = "http://${CT_ADDR}:8201"
 
-disable_mlock = false
+# Integrated storage memory-maps its DB; HashiCorp recommends no mlock here.
+# The CT has no swap instead.
+disable_mlock = true
 EOF
-chown vault:vault /etc/vault.d/vault.hcl
-chmod 640 /etc/vault.d/vault.hcl
+chown vault:vault /etc/vault.d/vault.hcl; chmod 0640 /etc/vault.d/vault.hcl
 fi
 
-if [ ! -f /etc/systemd/system/vault.service ]; then
-cat > /etc/systemd/system/vault.service << 'EOF'
+cat > /etc/systemd/system/vault.service <<EOF
 [Unit]
-Description=Vault
+Description=HashiCorp Vault
 Documentation=https://developer.hashicorp.com/vault
 Requires=network-online.target
 After=network-online.target
@@ -229,25 +150,31 @@ KillSignal=SIGINT
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
-LimitMEMLOCK=infinity
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
-fi
-
 systemctl daemon-reload
-systemctl enable --now vault
-"
+systemctl enable --now vault >/dev/null
 
-echo "Vault LXC ready: CT ${CTID} (${CT_HOSTNAME})"
-echo "  API:  http://${CT_IP%/*}:8200"
-echo "  UI:   http://${CT_IP%/*}:8200/ui"
-echo ""
-echo "NOT initialized/unsealed yet if this is the first run. From inside the CT:"
-echo "  pct exec ${CTID} -- env VAULT_ADDR=http://127.0.0.1:8200 /usr/local/bin/vault operator init"
-echo "  (copy the 5 unseal keys + root token somewhere safe — shown ONCE)"
-echo "  pct exec ${CTID} -- env VAULT_ADDR=http://127.0.0.1:8200 /usr/local/bin/vault operator unseal   # x3, different keys"
-echo ""
-echo "After every CT/host restart, Vault comes back sealed — repeat the"
-echo "'operator unseal' step (x3) manually. Not automated, see script header."
+for i in $(seq 30); do
+  curl -s -o /dev/null http://127.0.0.1:8200/v1/sys/health && break; sleep 1
+done
+VAULT_ADDR=http://127.0.0.1:8200 /usr/local/bin/vault status || true
+'
+
+cat <<EOF
+
+Vault CT ${CTID} (${CT_HOSTNAME}): http://${CT_IP%/*}:8200 (LAN), ${PUBLIC_URL} (svc:vault)
+
+First run only — init (keys and root token are shown ONCE):
+  ssh bare-pve "pct exec ${CTID} -- env VAULT_ADDR=http://127.0.0.1:8200 /usr/local/bin/vault operator init -key-shares=5 -key-threshold=3"
+
+After every restart of the CT or the node — unseal with 3 different keys:
+  ssh -t bare-pve "pct exec ${CTID} -- env VAULT_ADDR=http://127.0.0.1:8200 /usr/local/bin/vault operator unseal"   # x3
+EOF
