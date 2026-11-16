@@ -32,7 +32,10 @@ variable "nodes" {
   description = <<-EOT
     Cluster nodes. endpoint: API URL; ssh_address: what the provider SSHes to
     for snippet uploads (without it the provider uses the node IP the API
-    reports). Override per machine with a *_override.tf, not in git.
+    reports). Every node shares one API endpoint, svc:pve: a Tailscale
+    Service hosted by lxc-<node> on all three nodes, so the API survives any
+    single node going down (the API of any node manages the whole cluster).
+    Override per machine with a *_override.tf, not in git.
   EOT
   type = map(object({
     endpoint    = string
@@ -40,15 +43,15 @@ variable "nodes" {
   }))
   default = {
     "bare-pve" = {
-      endpoint    = "https://lxc-bare-pve.tail65829d.ts.net:8006/"
+      endpoint    = "https://pve.tail65829d.ts.net/"
       ssh_address = "bare-pve.tail65829d.ts.net"
     }
     "pve-rog" = {
-      endpoint    = "https://lxc-pve-rog.tail65829d.ts.net:8006/"
+      endpoint    = "https://pve.tail65829d.ts.net/"
       ssh_address = "pve-rog.tail65829d.ts.net"
     }
     "amd-pve" = {
-      endpoint    = "https://lxc-amd-pve.tail65829d.ts.net:8006/"
+      endpoint    = "https://pve.tail65829d.ts.net/"
       ssh_address = "amd-pve.tail65829d.ts.net"
     }
   }
